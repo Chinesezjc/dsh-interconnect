@@ -1,0 +1,76 @@
+{
+  "name": "dsh-interconnect",
+  "description": "Cross-instance message/event handoff plugins for DeepSeek Harness (DSH): interconnect service + model-facing tools",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./interconnect": {
+      "types": "./lib/types/interconnect/index.d.ts",
+      "default": "./lib/interconnect/index.js"
+    },
+    "./tool-interconnect": {
+      "types": "./lib/types/tool-interconnect/index.d.ts",
+      "default": "./lib/tool-interconnect/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-credentials": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-subagent": "*",
+    "@deepseek-ai/dsh-host-apiproxy": "*",
+    "@deepseek-ai/dsh-host-webserver": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-invariants": "*",
+    "@deepseek-ai/schemastery": "*",
+    "ws": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:../dsh/vendor/cordis",
+    "@deepseek-ai/schemastery": "link:../dsh/vendor/schemastery",
+    "@deepseek-ai/dsh-agent": "link:../dsh/packages/core/agent",
+    "@deepseek-ai/dsh-credentials": "link:../dsh/packages/credentials/credentials",
+    "@deepseek-ai/dsh-llm": "link:../dsh/packages/llm/llm",
+    "@deepseek-ai/dsh-session": "link:../dsh/packages/core/session",
+    "@deepseek-ai/dsh-subagent": "link:../dsh/packages/subagent/subagent",
+    "@deepseek-ai/dsh-host-apiproxy": "link:../dsh/packages/host/apiproxy",
+    "@deepseek-ai/dsh-host-webserver": "link:../dsh/packages/host/webserver",
+    "@deepseek-ai/dsh-tools": "link:../dsh/packages/core/tools",
+    "@deepseek-ai/dsh-invariants": "link:../dsh/packages/runtime-diagnostics/invariants",
+    "@deepseek-ai/dsh-system-prompt": "link:../dsh/packages/core/system-prompt",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8",
+    "ws": "^8.21.0"
+  }
+}

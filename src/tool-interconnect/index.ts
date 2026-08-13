@@ -12,8 +12,8 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-// Activates the `Context.interconnect` merge declared by the interconnect package.
-import type {} from '@deepseek-ai/dsh-interconnect'
+// Activates the `Context.interconnect` merge declared by the interconnect service plugin.
+import type {} from '../interconnect/index.ts'
 
 /** Services required before the tools can register. */
 export const inject = ['interconnect', 'tools']

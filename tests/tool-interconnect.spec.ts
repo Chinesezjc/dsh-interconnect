@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import * as toolInterconnect from '@deepseek-ai/dsh-tool-interconnect'
-import type { InterconnectService } from '@deepseek-ai/dsh-interconnect'
+import * as toolInterconnect from '../src/tool-interconnect/index.ts'
+import type { InterconnectService } from '../src/interconnect/index.ts'
 
 /** Minimal fake interconnect service recording calls and returning fixed results. */
 function fakeInterconnect(overrides: Partial<InterconnectService> = {}): InterconnectService {

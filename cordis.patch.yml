@@ -1,0 +1,12 @@
+# dsh-interconnect bundle patch: mount the two host plugins under their
+# subpath entries, resolved through the profile's node_modules (the healed
+# mirror makes every bundle dependency resolvable to bare rows).
+- insert:
+    - id: interconnect
+      name: dsh-interconnect/interconnect
+      config:
+        instanceId: dsh
+        requestTimeoutMs: 10000
+
+    - id: tool-interconnect
+      name: dsh-interconnect/tool-interconnect

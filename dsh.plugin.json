@@ -1,0 +1,9 @@
+{
+  "name": "dsh-interconnect",
+  "description": "Cross-instance message/event handoff for DeepSeek Harness (DSH): HTTP send/ping, WebSocket link, and event fan-out between sessions, instances, and machines.",
+  "version": "0.1.0",
+  "entry": {
+    "name": "dsh-interconnect/interconnect",
+    "inject": ["webServer", "agents", "credentials"]
+  }
+}

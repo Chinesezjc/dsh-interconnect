@@ -11,8 +11,8 @@ import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credent
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import InterconnectService, { INTERCONNECT_CHANNEL, INTERCONNECT_TOKEN_REF } from '../src/index.ts'
-import type { EventNotification } from '../src/index.ts'
+import InterconnectService, { INTERCONNECT_CHANNEL, INTERCONNECT_TOKEN_REF } from '../src/interconnect/index.ts'
+import type { EventNotification } from '../src/interconnect/index.ts'
 import WebSocket from 'ws'
 
 /** Structural httpServer fake recording the route and upgrade registries this service touches. */
@@ -148,7 +148,7 @@ describe('interconnect host half', () => {
     const { routes, dispose } = await mounted('secret')
     for (const authorization of [undefined, 'Bearer wrong', 'secret', '']) {
       const { response, state } = fakeResponse()
-      const headers = authorization === undefined ? {} : { authorization }
+      const headers: Record<string, string> = authorization === undefined ? {} : { authorization }
       await routes[0]!.handler(
         fakeRequest({ url: `${INTERCONNECT_CHANNEL}/ping`, headers, body: {} }),
         response,
