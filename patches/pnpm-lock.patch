@@ -1,0 +1,70 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 364a560e38..6a40f80709 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -5226,6 +5226,65 @@ importers:
+         specifier: workspace:^
+         version: link:../../llm/llm
+ 
++  packages/interconnect/interconnect:
++    dependencies:
++      '@deepseek-ai/dsh-host-apiproxy':
++        specifier: workspace:^
++        version: link:../../host/apiproxy
++      '@deepseek-ai/schemastery':
++        specifier: link:../../../vendor/schemastery
++        version: link:../../../vendor/schemastery
++      ws:
++        specifier: ^8.21.0
++        version: 8.21.0
++    devDependencies:
++      '@deepseek-ai/cordis':
++        specifier: workspace:^
++        version: link:../../../vendor/cordis
++      '@deepseek-ai/dsh-agent':
++        specifier: workspace:^
++        version: link:../../core/agent
++      '@deepseek-ai/dsh-credentials':
++        specifier: workspace:^
++        version: link:../../credentials/credentials
++      '@deepseek-ai/dsh-host-webserver':
++        specifier: workspace:^
++        version: link:../../host/webserver
++      '@deepseek-ai/dsh-llm':
++        specifier: workspace:^
++        version: link:../../llm/llm
++      '@deepseek-ai/dsh-session':
++        specifier: workspace:^
++        version: link:../../core/session
++      '@deepseek-ai/dsh-subagent':
++        specifier: workspace:^
++        version: link:../../subagent/subagent
++      '@types/ws':
++        specifier: ^8.18.1
++        version: 8.18.1
++
++  packages/interconnect/tool-interconnect:
++    dependencies:
++      '@deepseek-ai/dsh-tools':
++        specifier: workspace:^
++        version: link:../../core/tools
++      '@deepseek-ai/schemastery':
++        specifier: link:../../../vendor/schemastery
++        version: link:../../../vendor/schemastery
++    devDependencies:
++      '@deepseek-ai/cordis':
++        specifier: workspace:^
++        version: link:../../../vendor/cordis
++      '@deepseek-ai/dsh-interconnect':
++        specifier: workspace:^
++        version: link:../interconnect
++      '@deepseek-ai/dsh-invariants':
++        specifier: workspace:^
++        version: link:../../support/invariants
++      '@deepseek-ai/dsh-system-prompt':
++        specifier: workspace:^
++        version: link:../../core/system-prompt
++
+   packages/llm/llm:
+     dependencies:
+       '@deepseek-ai/schemastery':

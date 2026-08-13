@@ -1,0 +1,13 @@
+diff --git a/tsconfig.host.json b/tsconfig.host.json
+index 3e25c9c510..8e1055b7d8 100644
+--- a/tsconfig.host.json
++++ b/tsconfig.host.json
+@@ -181,6 +181,8 @@
+     { "path": "./packages/skill/skill-local" },
+     { "path": "./packages/skill/tool-skill" },
+     { "path": "./packages/interaction/tool-ask-user" },
++    { "path": "./packages/interconnect/interconnect" },
++    { "path": "./packages/interconnect/tool-interconnect" },
+     { "path": "./packages/context/workspace-context" },
+     { "path": "./packages/core/agent-loop" },
+     { "path": "./packages/llm/llm-retry" },
