@@ -33,15 +33,14 @@ jobs:
         with:
           version: 11
 
-      # DeepSeek Harness's packages are unpublished; its type declarations are
-      # built artifacts (lib/ is gitignored). Install its workspace (default
-      # settings, frozen lockfile) and build the host TypeScript project so the
-      # plugin's typecheck can resolve the @deepseek-ai/dsh-* types.
-      - name: Install and build DeepSeek Harness types
+      # DeepSeek Harness's packages are unpublished. Install its workspace and
+      # run its full host build (tsc + tsdown) so the plugin can resolve both
+      # the compiled types and the runnable lib/index.js entry for tests.
+      - name: Install and build DeepSeek Harness
         working-directory: dsh
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec tsc -b tsconfig.host.json
+          pnpm run build:lib:host
 
       - name: Install plugin dependencies
         working-directory: plugin
