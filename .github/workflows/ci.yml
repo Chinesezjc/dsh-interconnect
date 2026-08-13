@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Layout: keep both repos side by side under the workspace so the
+      # plugin's link:../dsh devDependencies resolve within $GITHUB_WORKSPACE
+      # (actions/checkout cannot write outside it).
+      - name: Checkout DeepSeek Harness sibling
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          path: dsh
+
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install dependencies
+        working-directory: plugin
+        run: pnpm install --config.auto-install-peers=false
+
+      - name: Check
+        working-directory: plugin
+        run: pnpm run check
