@@ -30,7 +30,7 @@
     "lib/invariant.js",
     "lib/types/**/*.d.ts"
   ],
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "dependencies": {
     "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",
