@@ -9,7 +9,9 @@ import { mkdirSync } from 'node:fs'
 
 mkdirSync('lib', { recursive: true })
 
-const dshExternal = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-*']
+// `ws` is a peer-provided CommonJS package; keep it external alongside the
+// dsh/cordis host packages so the ESM bundle never inlines its `require`.
+const dshExternal = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-*', 'ws']
 
 for (const [entry, outfile] of [
   ['src/interconnect/index.ts', 'lib/interconnect/index.js'],
