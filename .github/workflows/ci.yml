@@ -9,8 +9,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      # Layout: keep both repos side by side under the workspace so the
-      # plugin's link:../dsh devDependencies resolve within $GITHUB_WORKSPACE
+      # Layout: both repos side by side under $GITHUB_WORKSPACE so the
+      # plugin's link:../dsh devDependencies resolve within the workspace
       # (actions/checkout cannot write outside it).
       - name: Checkout DeepSeek Harness sibling
         uses: actions/checkout@v4
@@ -33,7 +33,17 @@ jobs:
         with:
           version: 11
 
-      - name: Install dependencies
+      # DeepSeek Harness's packages are unpublished; its type declarations are
+      # built artifacts (lib/ is gitignored). Install its workspace and build
+      # the host TypeScript project so the plugin's typecheck can resolve the
+      # @deepseek-ai/dsh-* types.
+      - name: Install and build DeepSeek Harness types
+        working-directory: dsh
+        run: |
+          pnpm install --config.auto-install-peers=false
+          pnpm exec tsc -b tsconfig.host.json
+
+      - name: Install plugin dependencies
         working-directory: plugin
         run: pnpm install --config.auto-install-peers=false
 
