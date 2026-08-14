@@ -19,12 +19,19 @@
 
 ## 安装
 
+本包已发布到 npm：[`dsh-interconnect`](https://www.npmjs.com/package/dsh-interconnect)。
 本仓库是一个 DSH profile bundle（根 `package.json` 声明 `dsh.bundle.patch` 指向
 根 `cordis.patch.yml`，后者 `insert` 两个插件行）。
 
 ```bash
+# 从 npm
+dsh plugin --profile <name> add dsh-interconnect
+
+# 或从本地路径（已实测）
 dsh plugin --profile <name> add file:/path/to/dsh-interconnect
 ```
+
+registry 上的 tarball 自带 `lib/*.js` 与 `lib/types/**/*.d.ts`，安装时不跑构建。
 
 `dsh plugin add` 会把仓库识别为 bundle 并追加进 profile 的 `dsh.profile.bundles`。重启
 web 服务使 host 侧生效。两端实例的 `.credentials.yaml`（或等价凭据源）设置相同的
@@ -34,7 +41,7 @@ web 服务使 host 侧生效。两端实例的 `.credentials.yaml`（或等价�
 
 依赖 [公开的 DeepSeek Harness monorepo](https://github.com/deepseek-ai/deepseek-harness)
 作为 sibling checkout：`package.json` 的 `devDependencies` 用 `link:../dsh/...` 指向它，
-因为 `@deepseek-ai/dsh-*` 未发布到 npm，peer 依赖须由该 checkout 提供。
+peer 依赖由该 checkout 提供，构建与测试都跑在这份源码上。
 
 ```bash
 ln -s /path/to/deepseek-harness ../dsh
@@ -57,6 +64,9 @@ pnpm run build    # esbuild → lib/
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
 - CI（GitHub Actions）：clone 公开 DSH 仓库作为 sibling，跑 `pnpm run check`。
+- 已发布的 0.1.0：从 registry 下载的 tarball 与本地构建 shasum 一致；干净消费端
+  解析 `.`、`./tool-interconnect` 两个入口的类型均通过，负例（把 `string` 赋给
+  `number`）如期报 `TS2322`。
 
 ## 许可
 
