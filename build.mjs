@@ -6,6 +6,8 @@
  */
 import { build } from 'esbuild'
 import { mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 mkdirSync('lib', { recursive: true })
 
@@ -32,9 +34,10 @@ for (const [entry, outfile] of [
   })
 }
 
-// Re-export the two plugin surfaces from the package root for `.` importers.
+// Re-export the interconnect service surface from the package root for `.`
+// importers; `src/index.ts` is also the declaration entry for `exports["."]`.
 await build({
-  entryPoints: ['src/interconnect/index.ts'],
+  entryPoints: ['src/index.ts'],
   outfile: 'lib/index.js',
   bundle: true,
   format: 'esm',
@@ -43,3 +46,12 @@ await build({
   external: dshExternal,
   logLevel: 'info',
 })
+
+// Type declarations for the `exports.types` entries. esbuild strips types, so
+// `tsc` emits them separately from the same sources into `lib/types`.
+execFileSync(
+  process.execPath,
+  [fileURLToPath(import.meta.resolve('typescript/bin/tsc')), '-p', 'tsconfig.build.json'],
+  { stdio: 'inherit' },
+)
+
