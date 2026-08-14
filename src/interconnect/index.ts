@@ -23,7 +23,7 @@ import {
   type RpcError,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
@@ -64,6 +64,9 @@ declare module '@deepseek-ai/cordis' {
 const INVALID_REQUEST_RPC_ID = RpcId('invalid-request')
 /** Headroom for the request body so a malicious sender cannot pin the process. */
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
+/** `source.plugin` for messages this service splices into a local inbox. */
+const PLUGIN_SOURCE = 'dsh-interconnect'
 
 /** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
@@ -407,8 +410,18 @@ export class InterconnectService extends Service {
     if (agent === undefined) {
       return { delivered: false, instance: this.instanceId }
     }
+    // Attribute the message to this plugin, not to the human operator: the
+    // receiving agent must be able to tell a cross-instance handoff from text
+    // its own user typed. `SendPayload` carries no sender field (the wire shape
+    // is unauthenticated beyond the shared token), so the notice names the
+    // receiving instance the handoff landed on.
     const message = createUserMessage({
-      source: { kind: 'user' },
+      source: {
+        kind: 'plugin',
+        plugin: PLUGIN_SOURCE,
+        form: 'notice',
+        summary: boundContextSummary(`interconnect handoff delivered on instance ${this.instanceId}`),
+      },
       content: [{ type: 'text', text: payload.text }],
     })
     if (this.delivery === 'inject') {

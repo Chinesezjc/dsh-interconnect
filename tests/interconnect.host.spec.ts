@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -45,14 +46,26 @@ function fakeCredentials(token: string | undefined): Pick<CredentialProvider, 'r
 }
 
 /** Agent registry fake recording followup/inject deliveries per session; only liveIds resolve an Agent. */
-function fakeAgents(deliveries: Map<string, string[]>, liveIds: ReadonlySet<string>) {
+function fakeAgents(
+  deliveries: Map<string, string[]>,
+  liveIds: ReadonlySet<string>,
+  sources?: Map<string, MessageSource[]>,
+) {
   return {
     get(id: string): Agent | undefined {
       if (!liveIds.has(id)) return undefined
-      const record = (message: { content: readonly { type: 'text'; text: string }[] }): void => {
+      const record = (message: {
+        content: readonly { type: 'text'; text: string }[]
+        source: MessageSource
+      }): void => {
         const texts = deliveries.get(id) ?? []
         for (const block of message.content) texts.push(block.text)
         deliveries.set(id, texts)
+        if (sources !== undefined) {
+          const recorded = sources.get(id) ?? []
+          recorded.push(message.source)
+          sources.set(id, recorded)
+        }
       }
       return {
         followup: record,
@@ -103,14 +116,16 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   deliveries: Map<string, string[]>
+  sources: Map<string, MessageSource[]>
   dispose: () => Promise<void>
 }> {
   const ctx = new Context()
   const routes: WebRoute[] = []
   const upgrades: WebUpgradeRoute[] = []
   const deliveries = new Map<string, string[]>()
+  const sources = new Map<string, MessageSource[]>()
   ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-  ctx.provide('agents', fakeAgents(deliveries, liveIds))
+  ctx.provide('agents', fakeAgents(deliveries, liveIds, sources))
   ctx.provide('credentials', fakeCredentials(token) as CredentialProvider)
   const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000, peers, delivery })
   await fiber.await()
@@ -119,6 +134,7 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
     routes,
     upgrades,
     deliveries,
+    sources,
     dispose: async () => { await fiber.dispose() },
   }
 }
@@ -175,6 +191,30 @@ describe('interconnect host half', () => {
       type: 'server-response',
       rpcId: 'rpc-1',
       result: { ok: true, value: { pong: true, instance: 'test-instance' } },
+    })
+    await dispose()
+  })
+
+  it('attributes a delivered message to the plugin, never to the human user', async () => {
+    const { routes, sources, dispose } = await mounted('secret')
+    const { response } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'hello peer' }),
+      }),
+      response,
+    )
+    const recorded = sources.get(SESSION_ID)
+    expect(recorded).toHaveLength(1)
+    // A receiving agent must be able to tell a cross-instance handoff from text
+    // the local operator typed, so `kind: 'user'` is specifically wrong here.
+    expect(recorded![0]).toEqual({
+      kind: 'plugin',
+      plugin: 'dsh-interconnect',
+      form: 'notice',
+      summary: 'interconnect handoff delivered on instance test-instance',
     })
     await dispose()
   })
