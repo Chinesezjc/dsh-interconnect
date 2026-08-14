@@ -60,13 +60,16 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 21/21 单测通过（服务 16 + 工具 5）；类型检查、构建均干净。
+- 22/22 单测通过（服务 17 + 工具 5）；类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
 - CI（GitHub Actions）：clone 公开 DSH 仓库作为 sibling，跑 `pnpm run check`。
-- 已发布的 0.1.0：从 registry 下载的 tarball 与本地构建 shasum 一致；干净消费端
+- 已发布版本：从 registry 下载的 tarball 与本地构建 shasum 一致；干净消费端
   解析 `.`、`./tool-interconnect` 两个入口的类型均通过，负例（把 `string` 赋给
   `number`）如期报 `TS2322`。
+- 投递消息的 `source` 为 `{ kind: 'plugin', plugin: 'dsh-interconnect' }`，不是
+  `{ kind: 'user' }`——接收方 agent 据此区分跨实例投递与本地用户输入。负例：把
+  该 source 改回 `kind: 'user'`，对应断言转红。
 
 ## 许可
 
