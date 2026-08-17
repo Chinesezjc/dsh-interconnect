@@ -15,7 +15,25 @@
 **`tool-interconnect`** —— 模型可见工具：
 
 - `interconnect_send`：向对端实例的指定 session 投递消息，可选 `delivery` 指定投递模式
+- `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
+
+### 寻址
+
+`interconnect_send` 需要一个 session id，而调用方通常并不知道。`interconnect_list` 返回对端
+**当前 live** 的 session，每一行的 `sessionId` 在调用时刻都是合法的投递目标：
+
+```
+session-264d37b0-…  重构 interconnect 插件  [idle]
+session-b07326da-…                          [running]
+```
+
+`title` 与 `status` 是尽力而为的：标题来自可选的 title projection 服务，对端没装该服务、或
+该 session 还没有标题时，**整个键不出现**（而不是空字符串），所以「无标题」与「该对端不提供
+标题」可以区分。projection 抛错只会让那一行降级成只有 id，不会让整个列表失败。
+
+只列 live session 是有意的：`send` 能到达的正好是这些。对端存在但没有运行 agent 的 session
+不会出现在列表里，也收不到消息。
 
 ### 投递模式
 

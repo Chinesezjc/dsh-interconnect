@@ -11,6 +11,13 @@ function fakeInterconnect(overrides: Partial<InterconnectService> = {}): Interco
   return {
     send: vi.fn(async () => ({ delivered: true, instance: 'peer' })),
     ping: vi.fn(async () => ({ pong: true, instance: 'peer' })),
+    list: vi.fn(async () => ({
+      instance: 'peer',
+      sessions: [
+        { sessionId: 'sess-1', title: 'first', status: 'idle' },
+        { sessionId: 'sess-2' },
+      ],
+    })),
     ...overrides,
   } as unknown as InterconnectService
 }
@@ -113,6 +120,57 @@ describe('tool-interconnect', () => {
       { signal: new AbortController().signal } as never,
     )
     expect(value).toEqual({ reachable: true, instance: 'peer' })
+    await dispose()
+  })
+
+  it('registers interconnect_list and returns the peer session rows', async () => {
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_list')!
+    expect(tool.name).toBe('interconnect_list')
+    const value = await tool.execute(
+      { baseUrl: 'http://peer:9001' },
+      { signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    expect(interconnect.list).toHaveBeenCalledWith('http://peer:9001')
+    expect(value).toEqual({
+      reachable: true,
+      instance: 'peer',
+      sessions: [
+        { sessionId: 'sess-1', title: 'first', status: 'idle' },
+        { sessionId: 'sess-2' },
+      ],
+    })
+    await dispose()
+  })
+
+  it('omits absent title and status keys instead of sending explicit undefined', async () => {
+    // The wire schema forbids additional/undefined properties, so an untitled
+    // row must not carry the key at all.
+    const interconnect = fakeInterconnect({
+      list: vi.fn(async () => ({ instance: 'peer', sessions: [{ sessionId: 'bare' }] })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_list')!
+    const value = await tool.execute(
+      { baseUrl: 'http://peer:9001' },
+      { signal: new AbortController().signal } as never,
+    ) as { sessions: Record<string, unknown>[] }
+    expect('title' in value.sessions[0]!).toBe(false)
+    expect('status' in value.sessions[0]!).toBe(false)
+    await dispose()
+  })
+
+  it('reports unreachable from interconnect_list when the peer answers nothing', async () => {
+    const interconnect = fakeInterconnect({ list: vi.fn(async () => undefined) })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_list')!
+    const value = await tool.execute(
+      { baseUrl: 'http://peer:9001' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(value).toEqual({ reachable: false })
     await dispose()
   })
 })

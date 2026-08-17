@@ -38,10 +38,12 @@ import {
   type EventNotification,
   type EventPayload,
   type LinkFrame,
+  type ListResult,
   type PingResult,
   type SendPayload,
   type SendResult,
   type SendRequest,
+  type SessionSummary,
   type WebSocketLinkHandle,
 } from './types.ts'
 
@@ -234,6 +236,14 @@ export class InterconnectService extends Service {
   }
 
   /**
+   * List the peer's live sessions so a caller can discover a valid `send`
+   * target. `undefined` on transport or auth failure, matching `ping`.
+   */
+  async list(baseUrl: string): Promise<ListResult | undefined> {
+    return this.post<ListResult>(baseUrl, 'list', {})
+  }
+
+  /**
    * Add a peer origin to the event fan-out set at runtime. Returns a disposer
    * that removes it. Duplicate origins are idempotent.
    * @param peer - receiver origin, e.g. `http://127.0.0.1:3080`.
@@ -410,6 +420,9 @@ export class InterconnectService extends Service {
       }
       return this.deliver(parsed)
     }
+    if (endpoint === 'list') {
+      return this.listSessions()
+    }
     if (endpoint === 'event') {
       let eventPayload: EventPayload
       try {
@@ -427,6 +440,36 @@ export class InterconnectService extends Service {
   private receiveEvent(eventPayload: EventPayload): void {
     this.ctx.logger.info(`interconnect: remote event ${eventPayload.notification.kind} from ${eventPayload.sender}`)
     this.ctx.emit('interconnect/event', eventPayload.notification, eventPayload.sender)
+  }
+
+  /**
+   * Summarize every live local session so a sender can discover valid targets
+   * instead of having to know a session id already. Only live agents are listed
+   * because `send` can reach exactly those.
+   *
+   * Title and status are best-effort: the title projection is an optional
+   * service, and a receiver without it still returns the ids. A projection that
+   * throws degrades that one row rather than failing the whole listing, which
+   * matches how the Host's own session listing treats its projection column.
+   */
+  private listSessions(): ListResult {
+    const sessions = this.ctx.agents.list().map((agent): SessionSummary => {
+      let title: string | undefined
+      try {
+        const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
+        const value = snapshot?.values.title
+        if (typeof value === 'string' && value !== '') title = value
+      } catch {
+        // A failing projection must not hide a reachable session.
+        title = undefined
+      }
+      return {
+        sessionId: agent.id,
+        ...(title === undefined ? {} : { title }),
+        ...(typeof agent.status === 'string' ? { status: agent.status } : {}),
+      }
+    })
+    return { sessions, instance: this.instanceId }
   }
 
   /** Deliver one message to a live local session, if it exists. */

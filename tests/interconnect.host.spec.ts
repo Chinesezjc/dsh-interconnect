@@ -84,6 +84,18 @@ function fakeAgents(
         inject: record('inject'),
       } as unknown as Agent
     },
+    /**
+     * Live agents in `liveIds` order. Each carries an `id`, a `session` stub the
+     * projection registry is keyed by, and a status, so the list endpoint can be
+     * exercised without a real agent loop.
+     */
+    list(): Agent[] {
+      return [...liveIds].map(id => ({
+        id,
+        session: { id },
+        status: 'idle',
+      }) as unknown as Agent)
+    },
   }
 }
 
@@ -401,6 +413,103 @@ describe('interconnect host half', () => {
     expect(parsed.result.error.message).toContain('followup')
     expect(parsed.result.error.message).toContain('steer')
     expect(parsed.result.error.message).toContain('inject')
+    await dispose()
+  })
+
+  it('lists live sessions so a sender can discover targets without knowing an id', async () => {
+    const { ctx, routes, dispose } = await mounted('secret', new Set(['session-a', 'session-b']))
+    ctx.provide('sessionProjections', {
+      snapshot: (session: { id: string }) => ({
+        asOfSeq: 1,
+        values: session.id === 'session-a' ? { title: 'first session' } : {},
+      }),
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/list`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('list', {}),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: {
+        ok: true,
+        value: {
+          instance: 'test-instance',
+          sessions: [
+            // A titled session reports its title; an untitled one omits the key
+            // entirely so "untitled" stays distinguishable from "unavailable".
+            { sessionId: 'session-a', title: 'first session', status: 'idle' },
+            { sessionId: 'session-b', status: 'idle' },
+          ],
+        },
+      },
+    })
+    const [rowA, rowB] = (JSON.parse(state.body!) as {
+      result: { value: { sessions: Record<string, unknown>[] } }
+    }).result.value.sessions
+    expect(rowA).toHaveProperty('title')
+    expect(rowB).not.toHaveProperty('title')
+    await dispose()
+  })
+
+  it('lists sessions without titles when no projection service is mounted', async () => {
+    // A receiver that never registered a title projection must still answer the
+    // ids, because the ids are what `send` needs.
+    const { routes, dispose } = await mounted('secret', new Set(['session-a']))
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/list`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('list', {}),
+      }),
+      response,
+    )
+    const parsed = JSON.parse(state.body!) as {
+      result: { ok: boolean; value: { sessions: Record<string, unknown>[] } }
+    }
+    expect(parsed.result.ok).toBe(true)
+    expect(parsed.result.value.sessions).toEqual([{ sessionId: 'session-a', status: 'idle' }])
+    await dispose()
+  })
+
+  it('still lists a session whose title projection throws', async () => {
+    const { ctx, routes, dispose } = await mounted('secret', new Set(['session-a']))
+    ctx.provide('sessionProjections', {
+      snapshot: () => { throw new Error('projection exploded') },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/list`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('list', {}),
+      }),
+      response,
+    )
+    const parsed = JSON.parse(state.body!) as {
+      result: { ok: boolean; value: { sessions: Record<string, unknown>[] } }
+    }
+    expect(parsed.result.ok).toBe(true)
+    expect(parsed.result.value.sessions).toEqual([{ sessionId: 'session-a', status: 'idle' }])
+    await dispose()
+  })
+
+  it('requires the shared token for the list endpoint', async () => {
+    const { routes, dispose } = await mounted('secret')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/list`,
+        headers: {},
+        body: envelope('list', {}),
+      }),
+      response,
+    )
+    expect(state.status).toBe(401)
     await dispose()
   })
 

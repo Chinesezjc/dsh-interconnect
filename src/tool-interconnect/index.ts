@@ -122,4 +122,69 @@ export function apply(ctx: Context): void {
       return { reachable: true, instance: result.instance }
     },
   }))
+
+  ctx.tools.register(defineTool({
+    name: 'interconnect_list',
+    description: 'List the live sessions on a peer DSH instance, so a message can be addressed without '
+      + 'knowing a session id in advance. Every returned sessionId is a valid interconnect_send target at '
+      + 'the time of the call. Only live sessions appear: a session that exists on the peer but has no '
+      + 'running agent is not listed and cannot receive a message.',
+    parameters: {
+      baseUrl: {
+        type: 'string',
+        required: true,
+        description: 'Peer instance origin, e.g. http://127.0.0.1:3080.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          reachable: { type: 'boolean', required: true },
+          instance: { type: 'string' },
+          sessions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string', required: true },
+                title: { type: 'string' },
+                status: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        if (!value.reachable) return [{ type: 'text', text: 'unreachable or unauthorized' }]
+        const sessions = value.sessions ?? []
+        if (sessions.length === 0) {
+          return [{ type: 'text', text: `no live sessions on ${value.instance ?? '(unknown instance)'}` }]
+        }
+        const lines = sessions.map((session) => {
+          const title = session.title === undefined ? '' : ` ${session.title}`
+          const status = session.status === undefined ? '' : ` [${session.status}]`
+          return `${session.sessionId}${title}${status}`
+        })
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args) {
+      const result = await interconnect.list(args.baseUrl)
+      if (result === undefined) return { reachable: false }
+      return {
+        reachable: true,
+        instance: result.instance,
+        // Rebuild each row so an optional key stays absent rather than
+        // becoming an explicit undefined the wire schema would reject.
+        sessions: result.sessions.map(session => ({
+          sessionId: session.sessionId,
+          ...(session.title === undefined ? {} : { title: session.title }),
+          ...(session.status === undefined ? {} : { status: session.status }),
+        })),
+      }
+    },
+  }))
 }

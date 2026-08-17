@@ -71,6 +71,38 @@ export interface PingResult {
   readonly instance: string
 }
 
+/**
+ * One live session on the receiving instance. Only live agents appear: `send`
+ * can reach exactly these, so the listing is the set of valid `sessionId`
+ * values rather than a directory of everything ever persisted.
+ */
+export interface SessionSummary {
+  /** The session id to pass back as `SendPayload.sessionId`. */
+  readonly sessionId: string
+  /**
+   * The session's title when a title projection is available. Absent rather
+   * than empty when the projection is missing or the session has no title yet,
+   * so a caller can tell "untitled" from "titles unavailable on this receiver".
+   */
+  readonly title?: string
+  /** The agent's current status, so a sender can prefer an idle target. */
+  readonly status?: string
+}
+
+/** Business result of a `list` endpoint call. */
+export interface ListResult {
+  /** Live sessions in registration order. */
+  readonly sessions: readonly SessionSummary[]
+  /** Echoed receiver instance id (diagnostic; never trusted for routing). */
+  readonly instance: string
+}
+
+/** Outbound listing request: just the receiver origin. */
+export interface ListRequest {
+  /** Receiver origin, e.g. `http://127.0.0.1:3080`. */
+  readonly baseUrl: string
+}
+
 /** Outbound delivery request: receiver origin plus a `send` business payload. */
 export interface SendRequest {
   /** Receiver origin, e.g. `http://127.0.0.1:3080`. */
