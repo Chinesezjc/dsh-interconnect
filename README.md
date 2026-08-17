@@ -14,8 +14,22 @@
 
 **`tool-interconnect`** —— 模型可见工具：
 
-- `interconnect_send`：向对端实例的指定 session 投递消息
+- `interconnect_send`：向对端实例的指定 session 投递消息，可选 `delivery` 指定投递模式
 - `interconnect_ping`：探测对端实例活性与身份
+
+### 投递模式
+
+`delivery` 的三个取值各自对应一个 `Agent` 方法，即 `(inbox target, wakeup)` 组合：
+
+| 模式 | inbox target | 唤醒 | 行为 |
+|---|---|---|---|
+| `followup` | `next-turn` | 是 | 排队成独立一轮，等接收方当前那轮结束 |
+| `steer` | `next-step` | 是 | 插进运行中那轮的最近 step 边界，不等整轮结束；接收方 idle 时起新一轮 |
+| `inject` | `next-step` | 否 | 只写入上下文，不唤醒 idle 的 agent，可能一直不被读到 |
+
+紧急程度属于单条消息而非整条链路，所以发送方可以按消息覆盖接收方的默认模式；不带
+该字段时沿用接收方 `Config.delivery` 的配置。`SendResult.delivery` 回报实际生效的
+模式，发送方据此判断覆盖是否被采纳。
 
 ## 安装
 

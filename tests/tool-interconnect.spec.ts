@@ -57,6 +57,42 @@ describe('tool-interconnect', () => {
     await dispose()
   })
 
+  it('forwards an explicit delivery mode to the service and reports it back', async () => {
+    const interconnect = fakeInterconnect({
+      send: vi.fn(async () => ({ delivered: true, instance: 'peer', delivery: 'steer' as const })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    const value = await tool.execute(
+      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'urgent', delivery: 'steer' },
+      { signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    expect(interconnect.send).toHaveBeenCalledWith({
+      baseUrl: 'http://peer:9001',
+      sessionId: 'sess-1',
+      text: 'urgent',
+      delivery: 'steer',
+    })
+    expect(value).toEqual({ delivered: true, instance: 'peer', delivery: 'steer' })
+    await dispose()
+  })
+
+  it('omits the delivery key entirely when the caller passes no mode', async () => {
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    await tool.execute(
+      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { signal: new AbortController().signal } as never,
+    )
+    // An explicit `delivery: undefined` would serialize into the wire payload and
+    // fail the receiver's schema, so the key must be absent rather than undefined.
+    const mock = interconnect.send as unknown as { mock: { calls: [Record<string, unknown>][] } }
+    expect('delivery' in mock.mock.calls[0]![0]).toBe(false)
+    await dispose()
+  })
+
   it('reports unreachable when the peer pongs nothing', async () => {
     const interconnect = fakeInterconnect({ ping: vi.fn(async () => undefined) })
     const { ctx, dispose } = await mounted(interconnect)

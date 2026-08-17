@@ -47,6 +47,15 @@ export function apply(ctx: Context): void {
         required: true,
         description: 'Message text delivered to the peer session.',
       },
+      delivery: {
+        type: 'string',
+        enum: ['followup', 'steer', 'inject'],
+        description: 'How the message reaches the target agent. `followup` queues it as its own turn '
+          + 'behind whatever that agent is doing now. `steer` cuts into the nearest step boundary of a '
+          + 'running turn, so an urgent message does not wait for that turn to end. `inject` seeds '
+          + 'context without waking an idle agent, so it may sit unread. Omit to use the receiver\'s '
+          + 'configured default.',
+      },
     },
     output: {
       schema: {
@@ -55,12 +64,13 @@ export function apply(ctx: Context): void {
         properties: {
           delivered: { type: 'boolean', required: true },
           instance: { type: 'string', required: true },
+          delivery: { type: 'string' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
         text: value.delivered
-          ? `delivered to ${value.instance}`
+          ? `delivered to ${value.instance}${value.delivery === undefined ? '' : ` via ${value.delivery}`}`
           : `not delivered (no live session on ${value.instance})`,
       }],
     },
@@ -69,8 +79,13 @@ export function apply(ctx: Context): void {
         baseUrl: args.baseUrl,
         sessionId: args.sessionId,
         text: args.text,
+        ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
       })
-      return { delivered: result.delivered, instance: result.instance }
+      return {
+        delivered: result.delivered,
+        instance: result.instance,
+        ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
+      }
     },
   }))
 

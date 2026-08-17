@@ -13,7 +13,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import InterconnectService, { INTERCONNECT_CHANNEL, INTERCONNECT_TOKEN_REF } from '../src/interconnect/index.ts'
-import type { EventNotification } from '../src/interconnect/index.ts'
+import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'
 import WebSocket from 'ws'
 
 /** Structural httpServer fake recording the route and upgrade registries this service touches. */
@@ -45,16 +45,22 @@ function fakeCredentials(token: string | undefined): Pick<CredentialProvider, 'r
   }
 }
 
-/** Agent registry fake recording followup/inject deliveries per session; only liveIds resolve an Agent. */
+/**
+ * Agent registry fake recording deliveries per session; only liveIds resolve an
+ * Agent. `methods` records which Agent method each delivery called, because the
+ * three delivery modes differ only in that choice — a fake that aliases them to
+ * one recorder cannot observe the mode at all.
+ */
 function fakeAgents(
   deliveries: Map<string, string[]>,
   liveIds: ReadonlySet<string>,
   sources?: Map<string, MessageSource[]>,
+  methods?: Map<string, string[]>,
 ) {
   return {
     get(id: string): Agent | undefined {
       if (!liveIds.has(id)) return undefined
-      const record = (message: {
+      const record = (method: string) => (message: {
         content: readonly { type: 'text'; text: string }[]
         source: MessageSource
       }): void => {
@@ -66,10 +72,16 @@ function fakeAgents(
           recorded.push(message.source)
           sources.set(id, recorded)
         }
+        if (methods !== undefined) {
+          const called = methods.get(id) ?? []
+          called.push(method)
+          methods.set(id, called)
+        }
       }
       return {
-        followup: record,
-        inject: record,
+        followup: record('followup'),
+        steer: record('steer'),
+        inject: record('inject'),
       } as unknown as Agent
     },
   }
@@ -111,12 +123,13 @@ function envelope(method: string, payload: unknown) {
   return { type: 'client-request', rpcId: 'rpc-1', method, payload }
 }
 
-async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: string[] = [], delivery: 'followup' | 'inject' = 'followup'): Promise<{
+async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: string[] = [], delivery: DeliveryMode = 'followup'): Promise<{
   ctx: Context
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   deliveries: Map<string, string[]>
   sources: Map<string, MessageSource[]>
+  methods: Map<string, string[]>
   dispose: () => Promise<void>
 }> {
   const ctx = new Context()
@@ -124,8 +137,9 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   const upgrades: WebUpgradeRoute[] = []
   const deliveries = new Map<string, string[]>()
   const sources = new Map<string, MessageSource[]>()
+  const methods = new Map<string, string[]>()
   ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-  ctx.provide('agents', fakeAgents(deliveries, liveIds, sources))
+  ctx.provide('agents', fakeAgents(deliveries, liveIds, sources, methods))
   ctx.provide('credentials', fakeCredentials(token) as CredentialProvider)
   const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000, peers, delivery })
   await fiber.await()
@@ -135,6 +149,7 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
     upgrades,
     deliveries,
     sources,
+    methods,
     dispose: async () => { await fiber.dispose() },
   }
 }
@@ -238,7 +253,7 @@ describe('interconnect host half', () => {
   })
 
   it('delivers via inject instead of followup when delivery is inject', async () => {
-    const { routes, deliveries, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'inject')
+    const { routes, deliveries, methods, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'inject')
     const { response, state } = fakeResponse()
     await routes[0]!.handler(
       fakeRequest({
@@ -249,8 +264,84 @@ describe('interconnect host half', () => {
       response,
     )
     expect(deliveries.get(SESSION_ID)).toEqual(['quiet inject'])
+    // Assert the method, not just the text: all three modes deliver the same
+    // text and differ only in which Agent method they call.
+    expect(methods.get(SESSION_ID)).toEqual(['inject'])
     expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: true } },
+      result: { ok: true, value: { delivered: true, delivery: 'inject' } },
+    })
+    await dispose()
+  })
+
+  it('delivers via steer when the configured default is steer', async () => {
+    const { routes, methods, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'steer')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'cut in' }),
+      }),
+      response,
+    )
+    expect(methods.get(SESSION_ID)).toEqual(['steer'])
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: true, delivery: 'steer' } },
+    })
+    await dispose()
+  })
+
+  it('lets one message override the configured mode and steer into a running turn', async () => {
+    // Configured default is followup; the message asks for steer.
+    const { routes, methods, dispose } = await mounted('secret')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'urgent', delivery: 'steer' }),
+      }),
+      response,
+    )
+    expect(methods.get(SESSION_ID)).toEqual(['steer'])
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: true, delivery: 'steer' } },
+    })
+    await dispose()
+  })
+
+  it('falls back to the configured mode when a message omits the override', async () => {
+    const { routes, methods, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'inject')
+    const { response } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'no override' }),
+      }),
+      response,
+    )
+    expect(methods.get(SESSION_ID)).toEqual(['inject'])
+    await dispose()
+  })
+
+  it('rejects an unknown delivery mode instead of delivering it', async () => {
+    const { routes, methods, deliveries, dispose } = await mounted('secret')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'bad mode', delivery: 'cancel' }),
+      }),
+      response,
+    )
+    // An unvalidated mode would reach a method lookup on Agent, so the envelope
+    // must fail before any delivery happens.
+    expect(methods.get(SESSION_ID)).toBeUndefined()
+    expect(deliveries.get(SESSION_ID)).toBeUndefined()
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: false },
     })
     await dispose()
   })

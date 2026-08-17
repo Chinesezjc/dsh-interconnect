@@ -34,6 +34,7 @@ import {
   INTERCONNECT_CHANNEL,
   INTERCONNECT_TOKEN_REF,
   type Config,
+  type DeliveryMode,
   type EventNotification,
   type EventPayload,
   type LinkFrame,
@@ -87,10 +88,16 @@ const linkFrameSchema = z.union([
   z.object({ type: z.const('event'), notification: notificationSchema }),
 ])
 
-/** Wire union the send endpoint expects inside the ClientRequest payload slot. */
+/**
+ * Wire union the send endpoint expects inside the ClientRequest payload slot.
+ * `delivery` is optional and constrained to the same three names the config
+ * accepts, so an unknown mode fails the envelope instead of reaching a method
+ * lookup on `Agent`.
+ */
 const sendPayloadSchema = z.object({
   sessionId: z.string(),
   text: z.string(),
+  delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]),
 })
 
 /** Wire union the event endpoint expects — sender identity wrapping a discriminated fact. */
@@ -110,12 +117,12 @@ export class InterconnectService extends Service {
     instanceId: z.string().default('dsh'),
     requestTimeoutMs: z.natural().max(60000).default(10000),
     peers: z.array(z.string()).default([]),
-    delivery: z.union([z.const('followup'), z.const('inject')]).default('followup'),
+    delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]).default('followup'),
   })
 
   private readonly instanceId: string
   private readonly requestTimeoutMs: number
-  private readonly delivery: 'followup' | 'inject'
+  private readonly delivery: DeliveryMode
   private readonly peers = new Set<string>()
   private readonly subscriptions: (() => void)[] = []
   private readonly server = new WebSocketServer({ noServer: true })
@@ -210,7 +217,14 @@ export class InterconnectService extends Service {
   }
 
   async send(request: SendRequest): Promise<SendResult> {
-    const payload: SendPayload = { sessionId: request.sessionId, text: request.text }
+    // Spread the override only when present: JSON.stringify would otherwise
+    // drop an explicit `delivery: undefined` anyway, but building the key
+    // conditionally keeps the wire shape identical to a caller that omitted it.
+    const payload: SendPayload = {
+      sessionId: request.sessionId,
+      text: request.text,
+      ...(request.delivery === undefined ? {} : { delivery: request.delivery }),
+    }
     const result = await this.post<SendResult>(request.baseUrl, 'send', payload)
     return result ?? { delivered: false, instance: this.instanceId }
   }
@@ -424,12 +438,24 @@ export class InterconnectService extends Service {
       },
       content: [{ type: 'text', text: payload.text }],
     })
-    if (this.delivery === 'inject') {
-      agent.inject(message)
-    } else {
-      agent.followup(message)
+    // The sender may override the mode per message, because urgency belongs to
+    // one message rather than to the link; an absent override leaves the
+    // receiver's configured default in force. The switch is exhaustive over
+    // DeliveryMode so adding a mode fails the type check here instead of
+    // silently falling through to `followup`.
+    const mode: DeliveryMode = payload.delivery ?? this.delivery
+    switch (mode) {
+      case 'steer':
+        agent.steer(message)
+        break
+      case 'inject':
+        agent.inject(message)
+        break
+      case 'followup':
+        agent.followup(message)
+        break
     }
-    return { delivered: true, instance: this.instanceId }
+    return { delivered: true, instance: this.instanceId, delivery: mode }
   }
 
   /** POST one business call to a peer instance; undefined on transport/auth failure. */

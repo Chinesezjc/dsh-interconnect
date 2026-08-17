@@ -21,6 +21,19 @@ export const INTERCONNECT_CHANNEL = '/interconnect'
 export const INTERCONNECT_TOKEN_REF = 'DSH_INTERCONNECT_TOKEN'
 
 /**
+ * How one inbound message reaches the target agent's inbox. Each value names an
+ * existing `Agent` method, which is exactly the pair `(inbox target, wakeup)`:
+ * - `followup` — `next-turn` + wake: the message becomes its own turn, queued
+ *   behind whatever the agent is currently doing.
+ * - `steer` — `next-step` + wake: the message cuts into the nearest step
+ *   boundary of a running turn instead of waiting for that turn to finish; an
+ *   idle agent starts a turn.
+ * - `inject` — `next-step`, no wake: seeds model-facing context without waking
+ *   an idle agent, so it can sit unread until something else wakes it.
+ */
+export type DeliveryMode = 'followup' | 'steer' | 'inject'
+
+/**
  * Business payload for the `send` endpoint: deliver one text message to one
  * live session of the receiving instance.
  */
@@ -29,6 +42,12 @@ export interface SendPayload {
   readonly sessionId: string
   /** Message text delivered to the peer session's inbox. */
   readonly text: string
+  /**
+   * Per-message override of the receiver's configured delivery mode. Urgency is
+   * a property of one message, not of the link, so a sender may ask to cut into
+   * a running turn. Absent leaves the receiver's configured default in force.
+   */
+  readonly delivery?: DeliveryMode
 }
 
 /** Business result of a `send` endpoint call. */
@@ -37,6 +56,11 @@ export interface SendResult {
   readonly delivered: boolean
   /** Echoed receiver instance id (diagnostic; never trusted for routing). */
   readonly instance: string
+  /**
+   * The mode actually used, so a sender can tell whether its requested override
+   * took effect. Absent when nothing was delivered.
+   */
+  readonly delivery?: DeliveryMode
 }
 
 /** Business result of a `ping` endpoint call. */
@@ -53,6 +77,8 @@ export interface SendRequest {
   readonly baseUrl: string
   readonly sessionId: string
   readonly text: string
+  /** Per-message delivery override forwarded to the receiver. */
+  readonly delivery?: DeliveryMode
 }
 
 /**
@@ -113,10 +139,8 @@ export interface Config {
    */
   readonly peers?: string[]
   /**
-   * How an inbound `send` message reaches its target session.
-   * - `followup` wakes the target agent into a new turn carrying the message.
-   * - `inject` seeds model-facing context without waking the agent (it is
-   *   claimed at the next step boundary, and may miss a step already claimed).
+   * Default mode for inbound `send` messages that carry no per-message
+   * override. See {@link DeliveryMode} for what each mode does.
    */
-  readonly delivery?: 'followup' | 'inject'
+  readonly delivery?: DeliveryMode
 }
