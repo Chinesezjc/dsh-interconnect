@@ -376,6 +376,17 @@ export class InterconnectService extends Service {
         res.end('not found')
         return
       }
+      // A payload the endpoint schema rejects is the caller's error, so it gets
+      // `bad-request` and no warning: logging it would let a peer fill this
+      // instance's log by sending malformed payloads.
+      if (error instanceof InvalidPayloadError) {
+        writeError(res, rpcId, {
+          code: 'bad-request',
+          message: error.message,
+          details: { issues: [] },
+        })
+        return
+      }
       this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
       writeError(res, rpcId, {
         code: 'internal',
@@ -395,7 +406,7 @@ export class InterconnectService extends Service {
       try {
         parsed = z.resolve(payload, sendPayloadSchema, {})[0] as SendPayload
       } catch (error) {
-        throw new Error(`send payload invalid: ${error instanceof Error ? error.message : String(error)}`)
+        throw new InvalidPayloadError(`send payload invalid: ${error instanceof Error ? error.message : String(error)}`)
       }
       return this.deliver(parsed)
     }
@@ -404,7 +415,7 @@ export class InterconnectService extends Service {
       try {
         eventPayload = z.resolve(payload, eventPayloadSchema, {})[0] as EventPayload
       } catch (error) {
-        throw new Error(`event payload invalid: ${error instanceof Error ? error.message : String(error)}`)
+        throw new InvalidPayloadError(`event payload invalid: ${error instanceof Error ? error.message : String(error)}`)
       }
       this.receiveEvent(eventPayload)
       return { accepted: true }
@@ -567,6 +578,19 @@ class UnknownEndpointError extends Error {
   constructor(endpoint: string) {
     super(`unknown interconnect endpoint ${JSON.stringify(endpoint)}`)
     this.name = 'UnknownEndpointError'
+  }
+}
+
+/**
+ * Thrown when an authenticated envelope carries a business payload its endpoint
+ * schema rejects. Typed so the request catch can answer `bad-request` instead of
+ * `internal`: the caller sent an unusable payload, so retrying it unchanged can
+ * never succeed, and the receiver is not faulty.
+ */
+class InvalidPayloadError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'InvalidPayloadError'
   }
 }
 

@@ -364,7 +364,7 @@ describe('interconnect host half', () => {
     await dispose()
   })
 
-  it('rejects a malformed send payload as an internal error', async () => {
+  it('rejects a malformed send payload as a bad request, not an internal error', async () => {
     const { routes, dispose } = await mounted('secret')
     const { response, state } = fakeResponse()
     await routes[0]!.handler(
@@ -377,8 +377,30 @@ describe('interconnect host half', () => {
     )
     expect(state.status).toBe(200)
     expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: false, error: { code: 'internal' } },
+      result: { ok: false, error: { code: 'bad-request' } },
     })
+    await dispose()
+  })
+
+  it('reports an unknown delivery mode as a bad request naming the accepted modes', async () => {
+    const { routes, dispose } = await mounted('secret')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'hi', delivery: 'bogus' }),
+      }),
+      response,
+    )
+    const parsed = JSON.parse(state.body!) as {
+      result: { ok: boolean; error: { code: string; message: string } }
+    }
+    expect(parsed.result.ok).toBe(false)
+    expect(parsed.result.error.code).toBe('bad-request')
+    expect(parsed.result.error.message).toContain('followup')
+    expect(parsed.result.error.message).toContain('steer')
+    expect(parsed.result.error.message).toContain('inject')
     await dispose()
   })
 
@@ -432,7 +454,38 @@ describe('interconnect event notification', () => {
     await dispose()
   })
 
-  it('rejects a malformed inbound event payload as internal error', async () => {
+  it('still answers internal for a genuine delivery fault, so bad-request stays caller-only', async () => {
+    // Distinguishes the two failure classes: an unusable payload is the
+    // caller's fault (bad-request), while an agent method that throws is this
+    // instance's fault and must keep reporting internal.
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+    ctx.provide('agents', {
+      get: () => ({
+        followup: () => { throw new Error('inbox exploded') },
+      }) as unknown as Agent,
+    })
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
+    await fiber.await()
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'hi' }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: false, error: { code: 'internal', message: 'inbox exploded' } },
+    })
+    await fiber.dispose()
+  })
+
+  it('rejects a malformed inbound event payload as a bad request', async () => {
     const { routes, dispose } = await mounted('secret')
     const { response, state } = fakeResponse()
     await routes[0]!.handler(
@@ -443,7 +496,7 @@ describe('interconnect event notification', () => {
       }),
       response,
     )
-    expect(JSON.parse(state.body!)).toMatchObject({ result: { ok: false, error: { code: 'internal' } } })
+    expect(JSON.parse(state.body!)).toMatchObject({ result: { ok: false, error: { code: 'bad-request' } } })
     await dispose()
   })
 
