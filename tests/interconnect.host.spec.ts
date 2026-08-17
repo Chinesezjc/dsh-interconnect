@@ -358,7 +358,7 @@ describe('interconnect host half', () => {
     await dispose()
   })
 
-  it('reports not delivered for an absent session without throwing', async () => {
+  it('reports not delivered for an absent session without throwing, naming the cause', async () => {
     const { routes, deliveries, dispose } = await mounted('secret')
     const { response, state } = fakeResponse()
     await routes[0]!.handler(
@@ -370,9 +370,30 @@ describe('interconnect host half', () => {
       response,
     )
     expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false } },
+      // The receiver answered, so the id is simply not live here — distinct from
+      // a receiver that never answered at all.
+      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
     })
     expect(deliveries.size).toBe(0)
+    await dispose()
+  })
+
+  it('omits the failure reason when delivery succeeds', async () => {
+    const { routes, dispose } = await mounted('secret')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'hello' }),
+      }),
+      response,
+    )
+    const value = (JSON.parse(state.body!) as {
+      result: { value: Record<string, unknown> }
+    }).result.value
+    expect(value.delivered).toBe(true)
+    expect('reason' in value).toBe(false)
     await dispose()
   })
 
@@ -686,6 +707,51 @@ describe('interconnect over a real HTTP server', () => {
     } finally {
       await close()
       await dispose()
+    }
+  })
+  it('carries session-not-live back to the sender across the wire', async () => {
+    // Two mounts: one is the sender's service, the other serves as the peer.
+    const receiver = await mounted('secret')
+    const { port, close } = await serve(receiver.routes)
+    const sender = await mounted('secret')
+    try {
+      const result = await sender.ctx.interconnect.send({
+        baseUrl: `http://127.0.0.1:${String(port)}`,
+        sessionId: 'not-open-anywhere',
+        text: 'hello',
+      })
+      expect(result.delivered).toBe(false)
+      // The peer answered, so the reason is about the target, and the echoed
+      // instance is the RECEIVER's id — not the sender's.
+      expect(result.reason).toBe('session-not-live')
+      expect(result.instance).toBe('test-instance')
+    } finally {
+      await close()
+      await sender.dispose()
+      await receiver.dispose()
+    }
+  })
+
+  it('reports unreachable when the peer origin refuses the connection', async () => {
+    const sender = await mounted('secret')
+    // Bind a port, then close it, so the origin is syntactically valid but dead.
+    const probe = createServer()
+    await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve))
+    const deadPort = (probe.address() as AddressInfo).port
+    await new Promise<void>((resolve, reject) => {
+      probe.close(error => (error === undefined ? resolve() : reject(error)))
+    })
+    try {
+      const result = await sender.ctx.interconnect.send({
+        baseUrl: `http://127.0.0.1:${String(deadPort)}`,
+        sessionId: 'anything',
+        text: 'hello',
+      })
+      expect(result.delivered).toBe(false)
+      // Nothing answered, so no claim is made about the session itself.
+      expect(result.reason).toBe('unreachable')
+    } finally {
+      await sender.dispose()
     }
   })
 })

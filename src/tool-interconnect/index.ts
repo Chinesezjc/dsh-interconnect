@@ -30,7 +30,9 @@ export function apply(ctx: Context): void {
     name: 'interconnect_send',
     description: 'Deliver one text message to a live session on another DSH instance (same machine, '
       + 'another machine, or another session), over a shared-secret-authenticated channel. '
-      + 'Returns whether the peer instance received it and which instance answered.',
+      + 'Returns whether the peer instance received it and which instance answered. '
+      + 'Only a session with a running agent can receive a message; when none is running the result '
+      + 'reports reason "session-not-live", and interconnect_list shows which sessions are live there.',
     parameters: {
       baseUrl: {
         type: 'string',
@@ -65,14 +67,26 @@ export function apply(ctx: Context): void {
           delivered: { type: 'boolean', required: true },
           instance: { type: 'string', required: true },
           delivery: { type: 'string' },
+          reason: { type: 'string' },
         },
       },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.delivered
-          ? `delivered to ${value.instance}${value.delivery === undefined ? '' : ` via ${value.delivery}`}`
-          : `not delivered (no live session on ${value.instance})`,
-      }],
+      render: (_args, value) => {
+        if (value.delivered) {
+          return [{
+            type: 'text',
+            text: `delivered to ${value.instance}${value.delivery === undefined ? '' : ` via ${value.delivery}`}`,
+          }]
+        }
+        // Each failure gets the response it actually needs: a not-live target is
+        // the caller's to re-choose, while an unreachable peer may just be worth
+        // retrying. The old single line claimed "no live session" even when the
+        // peer never answered, which pointed at the wrong thing entirely.
+        const text = value.reason === 'unreachable'
+          ? `not delivered: ${value.instance} did not answer (unreachable or unauthorized)`
+          : `not delivered: no live session "${_args.sessionId}" on ${value.instance}`
+            + ' — use interconnect_list to see which sessions are live there'
+        return [{ type: 'text', text }]
+      },
     },
     async execute(args) {
       const result = await interconnect.send({
@@ -85,6 +99,7 @@ export function apply(ctx: Context): void {
         delivered: result.delivered,
         instance: result.instance,
         ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
       }
     },
   }))

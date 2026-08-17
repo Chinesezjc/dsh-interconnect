@@ -35,6 +35,23 @@ session-b07326da-…                          [running]
 只列 live session 是有意的：`send` 能到达的正好是这些。对端存在但没有运行 agent 的 session
 不会出现在列表里，也收不到消息。
 
+### 投递失败的两种原因
+
+`delivered: false` 单独一个布尔值无法据以行动，因为两种失败需要相反的应对，所以
+`SendResult.reason` 会指明是哪一种：
+
+| `reason` | 含义 | 应对 |
+|---|---|---|
+| `session-not-live` | 对端**答复了**，但那个 session 没有运行中的 agent | 重试同一个 id 无用；用 `interconnect_list` 换一个目标 |
+| `unreachable` | 没拿到可用答复（传输失败，或鉴权被拒） | 目标 session 可能完好，重试可能成功 |
+
+`reason` 恰好在 `delivered` 为 false 时出现。
+
+**不会自动 resume 已持久化但未打开的 session**，这是有意的：`agents.resume()` 返回的
+handle 由调用方 context 拥有，实测确认插件 fiber 被 dispose 时会把 resume 出来的 agent 和
+session 一起拆掉（用根 ctx 调用则不会——ownership 跟随调用时用的那个 context）。让本插件的
+卸载连带杀掉用户正在用的会话是不可接受的，所以这里只报告 `session-not-live`。
+
 ### 投递模式
 
 `delivery` 的三个取值各自对应一个 `Agent` 方法，即 `(inbox target, wakeup)` 组合：

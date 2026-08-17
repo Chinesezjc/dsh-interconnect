@@ -50,6 +50,17 @@ export interface SendPayload {
   readonly delivery?: DeliveryMode
 }
 
+/**
+ * Why a `send` did not deliver. `delivered: false` alone cannot be acted on,
+ * because the two causes need opposite responses:
+ * - `session-not-live` — the receiver answered; that session has no running
+ *   agent. Retrying the same id is futile until it is opened, so the caller
+ *   should list live sessions and pick another target.
+ * - `unreachable` — no usable answer from the receiver (transport failure, or
+ *   auth rejected). The target may well be fine, so retrying can succeed.
+ */
+export type SendFailure = 'session-not-live' | 'unreachable'
+
 /** Business result of a `send` endpoint call. */
 export interface SendResult {
   /** True when the target session is live on the receiving instance and the message was delivered. */
@@ -61,6 +72,12 @@ export interface SendResult {
    * took effect. Absent when nothing was delivered.
    */
   readonly delivery?: DeliveryMode
+  /**
+   * Why delivery failed. Present exactly when `delivered` is false, so a caller
+   * can distinguish "wrong target" from "receiver unreachable" instead of
+   * guessing from a bare boolean.
+   */
+  readonly reason?: SendFailure
 }
 
 /** Business result of a `ping` endpoint call. */

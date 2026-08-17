@@ -228,7 +228,10 @@ export class InterconnectService extends Service {
       ...(request.delivery === undefined ? {} : { delivery: request.delivery }),
     }
     const result = await this.post<SendResult>(request.baseUrl, 'send', payload)
-    return result ?? { delivered: false, instance: this.instanceId }
+    // No usable answer means the receiver never spoke, so the instance id here
+    // is this sender's own — hence `unreachable` rather than any claim about
+    // the target session, which may be perfectly fine.
+    return result ?? { delivered: false, instance: this.instanceId, reason: 'unreachable' }
   }
 
   async ping(baseUrl: string): Promise<PingResult | undefined> {
@@ -476,7 +479,12 @@ export class InterconnectService extends Service {
   private deliver(payload: SendPayload): SendResult {
     const agent = this.ctx.agents.get(payload.sessionId as Agent['id'])
     if (agent === undefined) {
-      return { delivered: false, instance: this.instanceId }
+      // Name the cause: this instance answered, so the id is simply not live
+      // here. Resuming a persisted session is deliberately NOT done — the
+      // resumed agent's lifecycle would follow this plugin's fiber, so
+      // unloading the plugin would tear down a session its user is still
+      // using. The caller lists live sessions and picks a reachable target.
+      return { delivered: false, instance: this.instanceId, reason: 'session-not-live' }
     }
     // Attribute the message to this plugin, not to the human operator: the
     // receiving agent must be able to tell a cross-instance handoff from text

@@ -64,6 +64,50 @@ describe('tool-interconnect', () => {
     await dispose()
   })
 
+  it('surfaces the failure reason and points at interconnect_list for a not-live target', async () => {
+    const interconnect = fakeInterconnect({
+      send: vi.fn(async () => ({
+        delivered: false,
+        instance: 'peer',
+        reason: 'session-not-live' as const,
+      })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    const value = await tool.execute(
+      { baseUrl: 'http://peer:9001', sessionId: 'sess-gone', text: 'hi' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(value).toEqual({ delivered: false, instance: 'peer', reason: 'session-not-live' })
+    const rendered = tool.output!.render!({ baseUrl: 'http://peer:9001', sessionId: 'sess-gone', text: 'hi' }, value as never)
+    const text = (rendered as { type: 'text'; text: string }[])[0]!.text
+    expect(text).toContain('sess-gone')
+    expect(text).toContain('interconnect_list')
+    await dispose()
+  })
+
+  it('renders an unreachable peer without blaming the target session', async () => {
+    const interconnect = fakeInterconnect({
+      send: vi.fn(async () => ({
+        delivered: false,
+        instance: 'self',
+        reason: 'unreachable' as const,
+      })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    const value = await tool.execute(
+      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { signal: new AbortController().signal } as never,
+    )
+    const rendered = tool.output!.render!({ baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' }, value as never)
+    const text = (rendered as { type: 'text'; text: string }[])[0]!.text
+    expect(text).toContain('did not answer')
+    // The old single-line render claimed "no live session" for this case too.
+    expect(text).not.toContain('no live session')
+    await dispose()
+  })
+
   it('forwards an explicit delivery mode to the service and reports it back', async () => {
     const interconnect = fakeInterconnect({
       send: vi.fn(async () => ({ delivered: true, instance: 'peer', delivery: 'steer' as const })),
