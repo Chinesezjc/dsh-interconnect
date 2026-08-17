@@ -58,6 +58,14 @@ export function apply(ctx: Context): void {
           + 'context without waking an idle agent, so it may sit unread. Omit to use the receiver\'s '
           + 'configured default.',
       },
+      resume: {
+        type: 'boolean',
+        description: 'Wake the target session if it is persisted but has no running agent. Off by '
+          + 'default because delivery to a woken session starts a real agent turn — a billed model call '
+          + 'with that session\'s full toolset — in a conversation nobody is watching. Prefer '
+          + 'interconnect_list and an already-live target; set this only when that specific session must '
+          + 'be reached. The receiver may refuse, answering reason "resume-refused".',
+      },
     },
     output: {
       schema: {
@@ -81,10 +89,21 @@ export function apply(ctx: Context): void {
         // the caller's to re-choose, while an unreachable peer may just be worth
         // retrying. The old single line claimed "no live session" even when the
         // peer never answered, which pointed at the wrong thing entirely.
-        const text = value.reason === 'unreachable'
-          ? `not delivered: ${value.instance} did not answer (unreachable or unauthorized)`
-          : `not delivered: no live session "${_args.sessionId}" on ${value.instance}`
-            + ' — use interconnect_list to see which sessions are live there'
+        const text = ((): string => {
+          switch (value.reason) {
+            case 'unreachable':
+              return `not delivered: ${value.instance} did not answer (unreachable or unauthorized)`
+            case 'resume-refused':
+              return `not delivered: ${value.instance} does not allow waking persisted sessions`
+            case 'resume-failed':
+              return `not delivered: could not wake "${_args.sessionId}" on ${value.instance}`
+                + ' (no such persisted session, or another owner holds it)'
+            default:
+              return `not delivered: no live session "${_args.sessionId}" on ${value.instance}`
+                + ' — use interconnect_list to see which sessions are live there,'
+                + ' or set resume to wake this one'
+          }
+        })()
         return [{ type: 'text', text }]
       },
     },
@@ -94,6 +113,7 @@ export function apply(ctx: Context): void {
         sessionId: args.sessionId,
         text: args.text,
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
+        ...(args.resume === undefined ? {} : { resume: args.resume }),
       })
       return {
         delivered: result.delivered,

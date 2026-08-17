@@ -35,22 +35,43 @@ session-b07326da-…                          [running]
 只列 live session 是有意的：`send` 能到达的正好是这些。对端存在但没有运行 agent 的 session
 不会出现在列表里，也收不到消息。
 
-### 投递失败的两种原因
+### 投递失败的原因
 
-`delivered: false` 单独一个布尔值无法据以行动，因为两种失败需要相反的应对，所以
+`delivered: false` 单独一个布尔值无法据以行动，因为不同失败需要不同应对，所以
 `SendResult.reason` 会指明是哪一种：
 
 | `reason` | 含义 | 应对 |
 |---|---|---|
-| `session-not-live` | 对端**答复了**，但那个 session 没有运行中的 agent | 重试同一个 id 无用；用 `interconnect_list` 换一个目标 |
+| `session-not-live` | 对端**答复了**，但那个 session 没有运行中的 agent | 重试同一个 id 无用；用 `interconnect_list` 换目标，或带 `resume` |
 | `unreachable` | 没拿到可用答复（传输失败，或鉴权被拒） | 目标 session 可能完好，重试可能成功 |
+| `resume-refused` | 请求了唤醒，但对端不允许（`allowResume: false`） | 再带 `resume` 也没用 |
+| `resume-failed` | 允许唤醒且尝试了，但没得到 live agent（无此持久化 session，或被别的 owner 持有） | 换目标 |
 
 `reason` 恰好在 `delivered` 为 false 时出现。
 
-**不会自动 resume 已持久化但未打开的 session**，这是有意的：`agents.resume()` 返回的
-handle 由调用方 context 拥有，实测确认插件 fiber 被 dispose 时会把 resume 出来的 agent 和
-session 一起拆掉（用根 ctx 调用则不会——ownership 跟随调用时用的那个 context）。让本插件的
-卸载连带杀掉用户正在用的会话是不可接受的，所以这里只报告 `session-not-live`。
+### 唤醒离线 session（`resume`，默认关）
+
+`SendPayload.resume: true` 让对端唤醒一个已持久化但没有运行 agent 的 session。
+
+**默认关闭是有意的。** 实测确认：消息投递到 session 后会触发一次**完整的 agent 回合**——
+`wakeDriver()` → `kick()` → `turn()` → `llm.stream()`，即一次计费的模型调用，且 assembly
+里带着该 session 的完整工具集。在一个用户没打开、看不到、也无法中断的会话里启动这些，和
+「推一下已经开着的会话」不是一个量级，所以必须由发送方显式请求。
+
+两侧都有控制权：
+
+- **发送方**按消息决定 `resume`（默认不唤醒）
+- **接收方**用 `Config.allowResume`（默认 `true`）一票否决——因为花钱和跑工具的是它那台机器；
+  拒绝时在跑 lookup 之前就短路，回 `resume-refused`
+
+唤醒**不是**调本插件的 `ctx.agents.resume()`，而是走 Host 已配置的 `agent` lookup
+（`typert.lookups.get('agent')`）。这一点是关键：`resume()` 返回的 handle 由**调用方
+context** 拥有，实测确认插件 fiber 被 dispose 时会把 resume 出来的 agent 和 session 一起
+拆掉（同一调用改用根 ctx 则两者都存活）。交给 Host 的 resolver 之后 owner 是 api-proxy，
+而且它会按 session 日志里记录的 preset 重建工具集——不是空壳。
+
+没有 Host lookup 的部署（headless、无 api-proxy 的 profile）会降级为 `session-not-live`，
+不会报错。
 
 ### 投递模式
 

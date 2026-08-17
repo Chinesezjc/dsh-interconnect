@@ -48,18 +48,34 @@ export interface SendPayload {
    * a running turn. Absent leaves the receiver's configured default in force.
    */
   readonly delivery?: DeliveryMode
+  /**
+   * Ask the receiver to wake a persisted session that has no running agent.
+   *
+   * Opt-in, and deliberately not the default: delivery to a woken session runs
+   * a real agent turn — a billed model call whose assembly carries that
+   * session's full toolset — inside a conversation its owner is not watching
+   * and cannot interrupt. That is categorically more than nudging an already
+   * open session, so the sender must ask for it explicitly. The receiver can
+   * still refuse via `Config.allowResume`, because the cost lands on its
+   * machine.
+   */
+  readonly resume?: boolean
 }
 
 /**
  * Why a `send` did not deliver. `delivered: false` alone cannot be acted on,
- * because the two causes need opposite responses:
+ * because the causes need different responses:
  * - `session-not-live` — the receiver answered; that session has no running
  *   agent. Retrying the same id is futile until it is opened, so the caller
  *   should list live sessions and pick another target.
  * - `unreachable` — no usable answer from the receiver (transport failure, or
  *   auth rejected). The target may well be fine, so retrying can succeed.
+ * - `resume-refused` — the sender asked to wake a persisted session and this
+ *   receiver does not allow it. Retrying with `resume` set changes nothing.
+ * - `resume-failed` — waking was allowed and attempted but did not yield a live
+ *   agent (no persisted session under that id, or another owner holds it).
  */
-export type SendFailure = 'session-not-live' | 'unreachable'
+export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed'
 
 /** Business result of a `send` endpoint call. */
 export interface SendResult {
@@ -128,6 +144,8 @@ export interface SendRequest {
   readonly text: string
   /** Per-message delivery override forwarded to the receiver. */
   readonly delivery?: DeliveryMode
+  /** Ask the receiver to wake a persisted session; see {@link SendPayload.resume}. */
+  readonly resume?: boolean
 }
 
 /**
@@ -192,4 +210,11 @@ export interface Config {
    * override. See {@link DeliveryMode} for what each mode does.
    */
   readonly delivery?: DeliveryMode
+  /**
+   * Whether this instance honours a sender's `resume` request. Defaults to
+   * true: the sender must opt in per message anyway, and this switch exists so
+   * the side that pays — waking a session runs a billed model turn with that
+   * session's tools on THIS machine — can refuse outright.
+   */
+  readonly allowResume?: boolean
 }

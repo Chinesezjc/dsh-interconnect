@@ -135,7 +135,7 @@ function envelope(method: string, payload: unknown) {
   return { type: 'client-request', rpcId: 'rpc-1', method, payload }
 }
 
-async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: string[] = [], delivery: DeliveryMode = 'followup'): Promise<{
+async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: string[] = [], delivery: DeliveryMode = 'followup', allowResume = true): Promise<{
   ctx: Context
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
@@ -153,7 +153,7 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
   ctx.provide('agents', fakeAgents(deliveries, liveIds, sources, methods))
   ctx.provide('credentials', fakeCredentials(token) as CredentialProvider)
-  const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000, peers, delivery })
+  const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000, peers, delivery, allowResume })
   await fiber.await()
   return {
     ctx,
@@ -375,6 +375,155 @@ describe('interconnect host half', () => {
       result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
     })
     expect(deliveries.size).toBe(0)
+    await dispose()
+  })
+
+  it('does not wake a persisted session unless the sender asks', async () => {
+    // The lookup is present and would succeed, so this pins the OPT-IN itself:
+    // absent `resume`, waking must not be attempted at all.
+    const { ctx, routes, deliveries, dispose } = await mounted('secret')
+    let resolveCalls = 0
+    ctx.provide('typert', {
+      lookups: {
+        get: () => ({
+          resolve: async () => {
+            resolveCalls += 1
+            return { followup: () => {}, id: 'woken' }
+          },
+        }),
+      },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'persisted-only', text: 'hi' }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
+    })
+    expect(resolveCalls).toBe(0)
+    expect(deliveries.size).toBe(0)
+    await dispose()
+  })
+
+  it('wakes a persisted session through the host lookup when the sender opts in', async () => {
+    const { ctx, routes, dispose } = await mounted('secret')
+    const delivered: string[] = []
+    let askedFor: string | undefined
+    ctx.provide('typert', {
+      lookups: {
+        get: (key: string) => (key !== 'agent' ? undefined : {
+          resolve: async (id: string) => {
+            askedFor = id
+            // Stand in for the Host's resolver: it owns the resumed agent.
+            return { followup: (message: { content: { text: string }[] }) => { delivered.push(message.content[0]!.text) } }
+          },
+        }),
+      },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'persisted-only', text: 'wake up', resume: true }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: true, delivery: 'followup' } },
+    })
+    expect(askedFor).toBe('persisted-only')
+    expect(delivered).toEqual(['wake up'])
+    await dispose()
+  })
+
+  it('lets the receiver refuse waking even when the sender asks', async () => {
+    const { ctx, routes, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'followup', false)
+    let resolveCalls = 0
+    ctx.provide('typert', {
+      lookups: { get: () => ({ resolve: async () => { resolveCalls += 1; return {} } }) },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'persisted-only', text: 'hi', resume: true }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: false, reason: 'resume-refused' } },
+    })
+    // Refusal must short-circuit before the lookup runs: the cost is the point.
+    expect(resolveCalls).toBe(0)
+    await dispose()
+  })
+
+  it('degrades to not-live when no host lookup is mounted', async () => {
+    // A headless profile has no api-proxy, so waking is simply unavailable.
+    const { routes, dispose } = await mounted('secret')
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'persisted-only', text: 'hi', resume: true }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
+    })
+    await dispose()
+  })
+
+  it('reports resume-failed when the lookup refuses or finds nothing', async () => {
+    const { ctx, routes, dispose } = await mounted('secret')
+    ctx.provide('typert', {
+      lookups: {
+        get: () => ({ resolve: async () => { throw new Error('subagent owner holds it') } }),
+      },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'owned-elsewhere', text: 'hi', resume: true }),
+      }),
+      response,
+    )
+    // A refusing resolver is an expected outcome, so the call still answers ok.
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: false, reason: 'resume-failed' } },
+    })
+    await dispose()
+  })
+
+  it('prefers an already-live agent over waking anything', async () => {
+    const { ctx, routes, deliveries, dispose } = await mounted('secret')
+    let resolveCalls = 0
+    ctx.provide('typert', {
+      lookups: { get: () => ({ resolve: async () => { resolveCalls += 1; return {} } }) },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: SESSION_ID, text: 'hi', resume: true }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({ result: { ok: true, value: { delivered: true } } })
+    expect(resolveCalls).toBe(0)
+    expect(deliveries.get(SESSION_ID)).toEqual(['hi'])
     await dispose()
   })
 

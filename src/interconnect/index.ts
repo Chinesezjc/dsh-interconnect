@@ -43,6 +43,7 @@ import {
   type SendPayload,
   type SendResult,
   type SendRequest,
+  type SendFailure,
   type SessionSummary,
   type WebSocketLinkHandle,
 } from './types.ts'
@@ -100,6 +101,7 @@ const sendPayloadSchema = z.object({
   sessionId: z.string(),
   text: z.string(),
   delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]),
+  resume: z.boolean(),
 })
 
 /** Wire union the event endpoint expects — sender identity wrapping a discriminated fact. */
@@ -120,11 +122,13 @@ export class InterconnectService extends Service {
     requestTimeoutMs: z.natural().max(60000).default(10000),
     peers: z.array(z.string()).default([]),
     delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]).default('followup'),
+    allowResume: z.boolean().default(true),
   })
 
   private readonly instanceId: string
   private readonly requestTimeoutMs: number
   private readonly delivery: DeliveryMode
+  private readonly allowResume: boolean
   private readonly peers = new Set<string>()
   private readonly subscriptions: (() => void)[] = []
   private readonly server = new WebSocketServer({ noServer: true })
@@ -139,6 +143,7 @@ export class InterconnectService extends Service {
     this.instanceId = config.instanceId
     this.requestTimeoutMs = config.requestTimeoutMs
     this.delivery = config.delivery ?? 'followup'
+    this.allowResume = config.allowResume ?? true
     for (const peer of config.peers ?? []) this.peers.add(trimBase(peer))
 
     const route: WebRoute = {
@@ -226,6 +231,7 @@ export class InterconnectService extends Service {
       sessionId: request.sessionId,
       text: request.text,
       ...(request.delivery === undefined ? {} : { delivery: request.delivery }),
+      ...(request.resume === undefined ? {} : { resume: request.resume }),
     }
     const result = await this.post<SendResult>(request.baseUrl, 'send', payload)
     // No usable answer means the receiver never spoke, so the instance id here
@@ -381,7 +387,10 @@ export class InterconnectService extends Service {
     }
 
     try {
-      const value = this.runEndpoint(endpoint, parsed.data.payload)
+      // Awaited: `send` may resume a persisted session, which is asynchronous.
+      // Without the await a Promise would serialize as `{}` and every async
+      // rejection would escape this catch as an unhandled rejection.
+      const value = await this.runEndpoint(endpoint, parsed.data.payload)
       writeFull(res, rpcId, { ok: true, value })
     } catch (error) {
       if (error instanceof UnknownEndpointError) {
@@ -410,7 +419,7 @@ export class InterconnectService extends Service {
   }
 
   /** Dispatch one authenticated business call. */
-  private runEndpoint(endpoint: string, payload: unknown): unknown {
+  private async runEndpoint(endpoint: string, payload: unknown): Promise<unknown> {
     if (endpoint === 'ping') {
       return { pong: true, instance: this.instanceId }
     }
@@ -475,16 +484,51 @@ export class InterconnectService extends Service {
     return { sessions, instance: this.instanceId }
   }
 
-  /** Deliver one message to a live local session, if it exists. */
-  private deliver(payload: SendPayload): SendResult {
-    const agent = this.ctx.agents.get(payload.sessionId as Agent['id'])
+  /**
+   * Resolve a session that is not currently live, when the sender asked to wake
+   * it. Returns the agent, or the reason it stays undelivered.
+   *
+   * The resume is delegated to the Host's configured `agent` lookup rather than
+   * calling `ctx.agents.resume()` here, and that is the whole point: a handle
+   * from `resume()` is owned by the CALLING context, so resuming on this
+   * plugin's fiber would tear the session down again the moment the plugin
+   * unloads (measured: the same call through the root context leaves it alive).
+   * The Host's resolver owns it instead, and it also composes the preset the
+   * session recorded — so a woken agent comes back with the toolset its history
+   * was produced under, not an empty one.
+   */
+  private async wake(payload: SendPayload): Promise<{ agent: Agent } | { reason: SendFailure }> {
+    if (payload.resume !== true) return { reason: 'session-not-live' }
+    if (!this.allowResume) return { reason: 'resume-refused' }
+    // Optional by design: a deployment without the Host's lookup (headless, or
+    // a profile with no api-proxy) degrades to the plain not-live answer rather
+    // than failing the call.
+    const lookup = this.ctx.get('typert')?.lookups.get('agent')
+    if (lookup === undefined) return { reason: 'session-not-live' }
+    try {
+      const resolved = await lookup.resolve(payload.sessionId as never)
+      if (resolved === undefined || resolved === null) return { reason: 'resume-failed' }
+      return { agent: resolved as Agent }
+    } catch (error) {
+      // A refusing resolver is an expected outcome, not a fault of this
+      // instance: the id may not exist, or a subagent owner may hold it.
+      this.ctx.logger.info(`interconnect: resume refused for ${payload.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      return { reason: 'resume-failed' }
+    }
+  }
+
+  /**
+   * Deliver one message to a live local session, waking a persisted one only
+   * when the sender asked and this receiver allows it.
+   */
+  private async deliver(payload: SendPayload): Promise<SendResult> {
+    let agent = this.ctx.agents.get(payload.sessionId as Agent['id'])
     if (agent === undefined) {
-      // Name the cause: this instance answered, so the id is simply not live
-      // here. Resuming a persisted session is deliberately NOT done — the
-      // resumed agent's lifecycle would follow this plugin's fiber, so
-      // unloading the plugin would tear down a session its user is still
-      // using. The caller lists live sessions and picks a reachable target.
-      return { delivered: false, instance: this.instanceId, reason: 'session-not-live' }
+      const woken = await this.wake(payload)
+      if ('reason' in woken) {
+        return { delivered: false, instance: this.instanceId, reason: woken.reason }
+      }
+      agent = woken.agent
     }
     // Attribute the message to this plugin, not to the human operator: the
     // receiving agent must be able to tell a cross-instance handoff from text

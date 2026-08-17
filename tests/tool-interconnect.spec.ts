@@ -46,6 +46,38 @@ describe('tool-interconnect', () => {
     await dispose()
   })
 
+  it('forwards resume only when asked, keeping the key absent by default', async () => {
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    await tool.execute(
+      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { signal: new AbortController().signal } as never,
+    )
+    const mock = interconnect.send as unknown as { mock: { calls: [Record<string, unknown>][] } }
+    expect('resume' in mock.mock.calls[0]![0]).toBe(false)
+
+    await tool.execute(
+      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi', resume: true },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(mock.mock.calls[1]![0].resume).toBe(true)
+    await dispose()
+  })
+
+  it('renders resume-refused and resume-failed distinctly', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const tool = ctx.tools.get('interconnect_send')!
+    const args = { baseUrl: 'http://peer:9001', sessionId: 'sess-x', text: 'hi' }
+    const refused = tool.output!.render!(args, { delivered: false, instance: 'peer', reason: 'resume-refused' } as never)
+    const failed = tool.output!.render!(args, { delivered: false, instance: 'peer', reason: 'resume-failed' } as never)
+    expect((refused as { text: string }[])[0]!.text).toContain('does not allow waking')
+    expect((failed as { text: string }[])[0]!.text).toContain('could not wake')
+    // Neither should be mistaken for the plain not-live advice.
+    expect((refused as { text: string }[])[0]!.text).not.toContain('interconnect_list')
+    await dispose()
+  })
+
   it('dispatches interconnect_send to the service and returns delivered/instance', async () => {
     const interconnect = fakeInterconnect()
     const { ctx, dispose } = await mounted(interconnect)
