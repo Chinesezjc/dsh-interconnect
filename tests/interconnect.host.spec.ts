@@ -1125,6 +1125,39 @@ describe('interconnect WebSocket link', () => {
     }
   }
 
+  it('survives a local listener that throws on a peer-pushed event', async () => {
+    // Cordis propagates a listener throw back to the emitter, and this emit runs
+    // inside the socket's synchronous message handler — so without a guard any
+    // remote peer could kill this process by pushing an event a local listener
+    // mishandles.
+    const { ctx, upgrades, dispose } = await mounted('secret')
+    const { port, close } = await serveUpgrade(upgrades)
+    const uncaught: unknown[] = []
+    const onUncaught = (error: unknown): void => { uncaught.push(error) }
+    process.on('uncaughtException', onUncaught)
+    ctx.on('interconnect/event', () => { throw new Error('listener exploded') })
+    const client = new WebSocket(`ws://127.0.0.1:${String(port)}/interconnect/link`, {
+      headers: { authorization: 'Bearer secret' },
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once('open', resolve)
+        client.once('error', reject)
+      })
+      client.send(JSON.stringify({ type: 'hello', sender: 'dialer-x' }))
+      client.send(JSON.stringify({ type: 'event', notification: { kind: 'agent/status', sessionId: 's-1', status: 'running' } }))
+      await new Promise<void>(resolve => setTimeout(resolve, 80))
+      expect(uncaught).toEqual([])
+      // The link must stay usable after the listener failure.
+      expect(client.readyState).toBe(WebSocket.OPEN)
+    } finally {
+      process.off('uncaughtException', onUncaught)
+      client.terminate()
+      await close()
+      await dispose()
+    }
+  })
+
   it('registers one /interconnect/link upgrade route and removes it with the fiber', async () => {
     const { upgrades, dispose } = await mounted('secret')
     expect(upgrades).toHaveLength(1)

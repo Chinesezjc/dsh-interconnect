@@ -702,7 +702,16 @@ export class InterconnectService extends Service {
       return
     }
     const sender = this.peerOf.get(socket) ?? 'unknown-peer'
-    this.receiveEvent({ sender, notification: frame.notification })
+    try {
+      this.receiveEvent({ sender, notification: frame.notification })
+    } catch (error) {
+      // `receiveEvent` emits `interconnect/event`, and Cordis propagates a
+      // listener throw back to the emitter. This runs inside the socket's
+      // synchronous `message` handler, so an escaping throw becomes an
+      // uncaughtException — letting any remote peer kill this process by sending
+      // an event a local listener happens to mishandle.
+      this.ctx.logger.warn(`interconnect: listener for a ${frame.notification.kind} event from ${sender} threw: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 }
 
