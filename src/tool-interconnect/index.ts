@@ -98,6 +98,9 @@ export function apply(ctx: Context): void {
             case 'resume-failed':
               return `not delivered: could not wake "${_args.sessionId}" on ${value.instance}`
                 + ' (no such persisted session, or another owner holds it)'
+            case 'session-owned-by-subagent':
+              return `not delivered: "${_args.sessionId}" is a subagent's session on ${value.instance}`
+                + ' — its parent agent owns delivery, so reach it through that parent'
             default:
               return `not delivered: no live session "${_args.sessionId}" on ${value.instance}`
                 + ' — use interconnect_list to see which sessions are live there,'

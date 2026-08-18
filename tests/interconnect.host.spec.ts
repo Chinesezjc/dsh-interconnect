@@ -79,6 +79,10 @@ function fakeAgents(
         }
       }
       return {
+        id,
+        // The ownership predicate reads `session.header`, so the fake must carry
+        // one; an ordinary session has no subagent origin and no parent.
+        session: { id, header: {} },
         followup: record('followup'),
         steer: record('steer'),
         inject: record('inject'),
@@ -86,16 +90,19 @@ function fakeAgents(
     },
     /**
      * Live agents in `liveIds` order. Each carries an `id`, a `session` stub the
-     * projection registry is keyed by, and a status, so the list endpoint can be
-     * exercised without a real agent loop.
+     * projection registry is keyed by (with the `header` the ownership predicate
+     * reads), and a status, so the list endpoint can be exercised without a real
+     * agent loop.
      */
     list(): Agent[] {
       return [...liveIds].map(id => ({
         id,
-        session: { id },
+        session: { id, header: {} },
         status: 'idle',
       }) as unknown as Agent)
     },
+    /** No runtime parent owns a plain fake, so nothing is subagent-owned. */
+    isOwnedBy: () => false,
   }
 }
 
@@ -420,7 +427,10 @@ describe('interconnect host half', () => {
           resolve: async (id: string) => {
             askedFor = id
             // Stand in for the Host's resolver: it owns the resumed agent.
-            return { followup: (message: { content: { text: string }[] }) => { delivered.push(message.content[0]!.text) } }
+            return {
+              session: { header: {} },
+              followup: (message: { content: { text: string }[] }) => { delivered.push(message.content[0]!.text) },
+            }
           },
         }),
       },
@@ -483,6 +493,30 @@ describe('interconnect host half', () => {
     await dispose()
   })
 
+  it('reports session-not-live when the lookup cannot resume, rather than blaming a failed resume', async () => {
+    // Without api-proxy the base `agent` provider is a plain registry read
+    // (`agents.get`), so it answers undefined for anything not already live and
+    // can never resume. That is "not live here", not "waking was attempted and
+    // failed" — the two send the caller in different directions.
+    const { ctx, routes, dispose } = await mounted('secret')
+    ctx.provide('typert', {
+      lookups: { get: () => ({ resolve: async () => undefined }) },
+    })
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'never-live', text: 'hi', resume: true }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
+    })
+    await dispose()
+  })
+
   it('reports resume-failed when the lookup refuses or finds nothing', async () => {
     const { ctx, routes, dispose } = await mounted('secret')
     ctx.provide('typert', {
@@ -525,6 +559,75 @@ describe('interconnect host half', () => {
     expect(resolveCalls).toBe(0)
     expect(deliveries.get(SESSION_ID)).toEqual(['hi'])
     await dispose()
+  })
+
+  it('refuses to deliver into a session reserved to subagent routing', async () => {
+    // A subagent child is delivered to by its parent; splicing in from here
+    // would race that parent, so the live-hit path must be fenced too.
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const upgrades: WebUpgradeRoute[] = []
+    const spliced: string[] = []
+    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+    ctx.provide('agents', {
+      get: () => ({
+        id: 'child',
+        session: { header: { origin: 'subagent' } },
+        followup: () => { spliced.push('leaked') },
+      }) as unknown as Agent,
+      isOwnedBy: () => false,
+    })
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
+    await fiber.await()
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/send`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('send', { sessionId: 'child', text: 'hi' }),
+      }),
+      response,
+    )
+    expect(JSON.parse(state.body!)).toMatchObject({
+      result: { ok: true, value: { delivered: false, reason: 'session-owned-by-subagent' } },
+    })
+    // The message must not reach the inbox at all.
+    expect(spliced).toEqual([])
+    await fiber.dispose()
+  })
+
+  it('omits subagent-owned sessions from the listing it advertises', async () => {
+    // Advertising a row `send` would refuse makes the listing self-contradictory.
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+    ctx.provide('agents', {
+      get: () => undefined,
+      list: () => [
+        { id: 'plain', session: { id: 'plain', header: {} }, status: 'idle' },
+        { id: 'child', session: { id: 'child', header: { origin: 'subagent' } }, status: 'running' },
+      ] as unknown as Agent[],
+      isOwnedBy: () => false,
+    })
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
+    await fiber.await()
+    const { response, state } = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: `${INTERCONNECT_CHANNEL}/list`,
+        headers: { authorization: 'Bearer secret' },
+        body: envelope('list', {}),
+      }),
+      response,
+    )
+    const ids = (JSON.parse(state.body!) as {
+      result: { value: { sessions: { sessionId: string }[] } }
+    }).result.value.sessions.map(s => s.sessionId)
+    expect(ids).toEqual(['plain'])
+    await fiber.dispose()
   })
 
   it('omits the failure reason when delivery succeeds', async () => {
@@ -743,8 +846,10 @@ describe('interconnect event notification', () => {
     ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
     ctx.provide('agents', {
       get: () => ({
+        session: { header: {} },
         followup: () => { throw new Error('inbox exploded') },
       }) as unknown as Agent,
+      isOwnedBy: () => false,
     })
     ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
     const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })

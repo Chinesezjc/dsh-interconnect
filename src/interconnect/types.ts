@@ -74,8 +74,11 @@ export interface SendPayload {
  *   receiver does not allow it. Retrying with `resume` set changes nothing.
  * - `resume-failed` — waking was allowed and attempted but did not yield a live
  *   agent (no persisted session under that id, or another owner holds it).
+ * - `session-owned-by-subagent` — the session is reserved to subagent routing,
+ *   so its parent agent owns delivery. Injecting here would race that parent;
+ *   the sender must reach the child through its parent instead.
  */
-export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed'
+export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent'
 
 /** Business result of a `send` endpoint call. */
 export interface SendResult {

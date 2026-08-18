@@ -75,6 +75,12 @@ describe('tool-interconnect', () => {
     expect((failed as { text: string }[])[0]!.text).toContain('could not wake')
     // Neither should be mistaken for the plain not-live advice.
     expect((refused as { text: string }[])[0]!.text).not.toContain('interconnect_list')
+    const owned = tool.output!.render!(args, { delivered: false, instance: 'peer', reason: 'session-owned-by-subagent' } as never)
+    const ownedText = (owned as { text: string }[])[0]!.text
+    expect(ownedText).toContain('subagent')
+    expect(ownedText).toContain('parent')
+    // Waking cannot help here, so the wake advice must not appear.
+    expect(ownedText).not.toContain('set resume')
     await dispose()
   })
 

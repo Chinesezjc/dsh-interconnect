@@ -25,6 +25,9 @@ import {
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+// The Host's own subagent-ownership predicate, reused rather than reimplemented:
+// this is a safety rule, and a local copy of it would drift from the Host's.
+import { hasApiRemoteSubagentOwner } from '@deepseek-ai/dsh-api-remotes'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import z from '@deepseek-ai/schemastery'
@@ -465,7 +468,12 @@ export class InterconnectService extends Service {
    * matches how the Host's own session listing treats its projection column.
    */
   private listSessions(): ListResult {
-    const sessions = this.ctx.agents.list().map((agent): SessionSummary => {
+    // `agents.list()` includes subagent children; a row this instance would
+    // refuse to deliver to must not be advertised as a target, or the listing
+    // contradicts `send`.
+    const reachable = this.ctx.agents.list()
+      .filter(agent => !hasApiRemoteSubagentOwner(this.ctx, agent.session, agent))
+    const sessions = reachable.map((agent): SessionSummary => {
       let title: string | undefined
       try {
         const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
@@ -507,7 +515,12 @@ export class InterconnectService extends Service {
     if (lookup === undefined) return { reason: 'session-not-live' }
     try {
       const resolved = await lookup.resolve(payload.sessionId as never)
-      if (resolved === undefined || resolved === null) return { reason: 'resume-failed' }
+      // `undefined` is not a failed wake: the base `agent` provider is a plain
+      // registry read, so a deployment without the Host's resuming resolver
+      // answers undefined for every id that is not already live. Reporting
+      // `resume-failed` there would send the caller chasing a wake that was
+      // never possible, when the honest answer is that nothing is live here.
+      if (resolved === undefined || resolved === null) return { reason: 'session-not-live' }
       return { agent: resolved as Agent }
     } catch (error) {
       // A refusing resolver is an expected outcome, not a fault of this
@@ -529,6 +542,14 @@ export class InterconnectService extends Service {
         return { delivered: false, instance: this.instanceId, reason: woken.reason }
       }
       agent = woken.agent
+    }
+    // Fence the live-hit path too, exactly as the Host does before handing out a
+    // live agent: a session reserved to subagent routing is delivered to by its
+    // parent, and splicing into its inbox from here would race that parent. The
+    // wake path needs no separate check because the Host's resolver applies the
+    // same fence internally.
+    if (hasApiRemoteSubagentOwner(this.ctx, agent.session, agent)) {
+      return { delivered: false, instance: this.instanceId, reason: 'session-owned-by-subagent' }
     }
     // Attribute the message to this plugin, not to the human operator: the
     // receiving agent must be able to tell a cross-instance handoff from text

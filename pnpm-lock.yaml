@@ -14,6 +14,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../dsh/packages/core/agent
         version: link:../dsh/packages/core/agent
+      '@deepseek-ai/dsh-api-remotes':
+        specifier: link:../dsh/packages/api/remotes
+        version: link:../dsh/packages/api/remotes
       '@deepseek-ai/dsh-credentials':
         specifier: link:../dsh/packages/credentials/credentials
         version: link:../dsh/packages/credentials/credentials
