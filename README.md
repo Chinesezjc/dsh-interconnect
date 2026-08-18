@@ -48,8 +48,23 @@ session-b07326da-…                          [running]
 | `unreachable` | 没拿到可用答复（传输失败，或鉴权被拒） | 目标 session 可能完好，重试可能成功 |
 | `resume-refused` | 请求了唤醒，但对端不允许（`allowResume: false`） | 再带 `resume` 也没用 |
 | `resume-failed` | 允许唤醒且尝试了，但没得到 live agent（无此持久化 session，或被别的 owner 持有） | 换目标 |
+| `session-owned-by-subagent` | 该 session 属于 subagent 路由，投递权在它的父 agent | 通过父 agent 触达，别直接投 |
 
 `reason` 恰好在 `delivered` 为 false 时出现。
+
+只有真的「尝试唤醒但失败」才是 `resume-failed`。没装 api-proxy 的部署里，`agent` lookup
+退化成一次 registry 查询、根本没有唤醒能力，这时报 `session-not-live`——否则会让调用方去重试
+一个永远不可能成功的操作。
+
+### subagent 会话不可直投
+
+`interconnect_send` 不会往 subagent 拥有的 session 里投递，`interconnect_list` 也不会把它们
+列出来。那类 session 的投递权属于它的父 agent，从这里 splice 进 inbox 会和父 agent 抢。判定
+直接复用 Host 的 `hasApiRemoteSubagentOwner`（`@deepseek-ai/dsh-api-remotes`），而不是自己
+实现一份——这是安全规则，本地副本一定会和上游漂移。
+
+已实测：起一个真实 subagent 后，`interconnect_list` 不包含它；直接 `send` 到它的 id 返回
+`session-owned-by-subagent`，消息**没有**进入 inbox。
 
 ### 唤醒离线 session（`resume`，默认关）
 
