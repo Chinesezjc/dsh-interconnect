@@ -163,6 +163,19 @@ export class InterconnectService extends Service {
     ctx.effect(() => ctx.webServer.registerUpgrade(upgrade), 'interconnect: /interconnect/link websocket')
 
     // Liveness sweep: terminate sockets that stopped answering protocol pings.
+    // Deleting the CURRENT element of a `Set` while iterating is safe: Set
+    // iterators traverse live in insertion order, and a delete of an already
+    // visited element is a no-op for the traversal. `socket.terminate()` from
+    // `ws` fires its `close` handler asynchronously, so the `close` handler's
+    // own `this.sockets.delete(socket)` cannot run mid-iteration either
+    // (measured against the real `ws`). Neither delete removes a not-yet-visited
+    // element, so nothing is skipped.
+    // This timer is created before its cleanup effect below, so it could leak if
+    // any statement between here and that effect threw. The only statements in
+    // that window are `ctx.on(...)` registrations, and Cordis's `ctx.on` does not
+    // throw for any of the event names used here (verified against a real
+    // Context), so the window is not reachable. The teardown effect clears the
+    // timer when the fiber unwinds.
     this.heartbeatTimer = setInterval(() => {
       for (const socket of this.sockets) {
         if ((socket as WebSocket & { isAlive?: boolean }).isAlive === false) {
