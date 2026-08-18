@@ -299,7 +299,13 @@ export class InterconnectService extends Service {
   private fanout(notification: EventNotification): void {
     const payload: EventPayload = { sender: this.instanceId, notification }
     for (const peer of this.peers) {
-      void this.post(peer, 'event', payload)
+      // Fire-and-forget, but never unhandled: `post` guards its own fetch, yet
+      // the token read ahead of it is a provider call that may reject. This runs
+      // from a lifecycle-event listener, so an unhandled rejection would take the
+      // process down over a notification nobody awaited.
+      void this.post(peer, 'event', payload).catch((error: unknown) => {
+        this.ctx.logger.warn(`interconnect: event fan-out to ${peer} failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
     }
     this.broadcast(notification)
   }
@@ -628,7 +634,18 @@ export class InterconnectService extends Service {
 
   /** Inbound WebSocket upgrade: authenticate the bearer header, then accept. */
   private async handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
-    const token = await this.resolveToken()
+    let token: string | undefined
+    try {
+      token = await this.resolveToken()
+    } catch (error) {
+      // Fail closed and end the socket: the caller invokes this as
+      // `void handleUpgrade(...)`, so letting the rejection escape would both
+      // leave this client hanging on an open socket and surface as an unhandled
+      // rejection.
+      this.ctx.logger.warn(`interconnect: upgrade token read failed: ${error instanceof Error ? error.message : String(error)}`)
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
+      return
+    }
     if (token === undefined) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
       return
@@ -757,6 +774,13 @@ class LinkState implements WebSocketLinkHandle {
       socket.on('error', () => {
         // close follows; reconnect is scheduled there.
       })
+    }).catch(() => {
+      // A rejecting token read must not become an unhandled rejection, and must
+      // not silently end the dial loop either: without this the link would stay
+      // down until the process restarted, since no socket was ever created and
+      // so no `close` will arrive to schedule the retry.
+      if (this.closed) return
+      this.scheduleReconnect()
     })
   }
 

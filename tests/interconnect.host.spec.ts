@@ -33,6 +33,13 @@ function fakeHttpServer(routes: WebRoute[], upgrades: WebUpgradeRoute[]): Pick<W
   }
 }
 
+/** A provider whose resolve rejects, modelling a remote/vault backend outage. */
+function rejectingCredentials(): Pick<CredentialProvider, 'resolve'> {
+  return {
+    resolve: async () => { throw new Error('credentials backend unavailable') },
+  }
+}
+
 /** Credentials fake resolving one ref to a fixed non-empty value. */
 function fakeCredentials(token: string | undefined): Pick<CredentialProvider, 'resolve'> {
   return {
@@ -924,6 +931,94 @@ describe('interconnect event notification', () => {
         })
       })
     }
+  })
+})
+
+describe('interconnect resilience to a failing credentials provider', () => {
+  /** Collect unhandled rejections for the duration of one body. */
+  async function withUnhandledRejectionWatch(body: () => Promise<void>): Promise<unknown[]> {
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      await body()
+      // Unhandled rejections are reported a macrotask after they settle.
+      await new Promise(resolve => setTimeout(resolve, 50))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    return seen
+  }
+
+  it('does not raise an unhandled rejection when fan-out cannot read the token', async () => {
+    // The fan-out runs from a lifecycle listener; an escaping rejection there
+    // would terminate the process over a notification nobody awaited.
+    const seen = await withUnhandledRejectionWatch(async () => {
+      const ctx = new Context()
+      const routes: WebRoute[] = []
+      const upgrades: WebUpgradeRoute[] = []
+      ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+      ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+      ctx.provide('credentials', rejectingCredentials() as CredentialProvider)
+      const fiber = ctx.plugin(InterconnectService, {
+        instanceId: 'test-instance',
+        requestTimeoutMs: 10000,
+        peers: ['http://peer.invalid:9001'],
+      })
+      await fiber.await()
+      // Drive one fan-out through a real lifecycle event.
+      ctx.emit('agent/created', { agent: { session: { id: SESSION_ID } } } as never)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      await fiber.dispose()
+    })
+    expect(seen).toEqual([])
+  })
+
+  it('answers 403 and closes the socket when an upgrade cannot read the token', async () => {
+    const seen = await withUnhandledRejectionWatch(async () => {
+      const ctx = new Context()
+      const routes: WebRoute[] = []
+      const upgrades: WebUpgradeRoute[] = []
+      ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+      ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+      ctx.provide('credentials', rejectingCredentials() as CredentialProvider)
+      const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
+      await fiber.await()
+      const written: string[] = []
+      const socket = { end: (chunk?: string) => { if (chunk !== undefined) written.push(chunk) } }
+      // The production caller invokes this as `void handleUpgrade(...)`.
+      upgrades[0]!.handler(
+        { headers: { authorization: 'Bearer secret' }, url: `${INTERCONNECT_CHANNEL}/link` } as never,
+        socket as never,
+        Buffer.alloc(0),
+      )
+      await new Promise(resolve => setTimeout(resolve, 20))
+      // Fail closed rather than hang the client on an open socket.
+      expect(written.join('')).toContain('403')
+      await fiber.dispose()
+    })
+    expect(seen).toEqual([])
+  })
+  it('keeps the dial loop alive and silent when the token read rejects', async () => {
+    // No socket is created when the token read fails, so no `close` event will
+    // arrive to schedule the retry: without its own catch the link would stay
+    // down until a restart, and the rejection would escape unhandled.
+    const seen = await withUnhandledRejectionWatch(async () => {
+      const ctx = new Context()
+      const routes: WebRoute[] = []
+      const upgrades: WebUpgradeRoute[] = []
+      ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+      ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+      ctx.provide('credentials', rejectingCredentials() as CredentialProvider)
+      const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
+      await fiber.await()
+      const handle = ctx.interconnect.link('http://peer.invalid:9001')
+      await new Promise(resolve => setTimeout(resolve, 30))
+      // Closing must remain possible after a failed dial.
+      handle.close()
+      await fiber.dispose()
+    })
+    expect(seen).toEqual([])
   })
 })
 
