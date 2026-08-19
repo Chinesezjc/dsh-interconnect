@@ -7,8 +7,9 @@
 
 **`interconnect`** —— host 服务（`ctx.interconnect`）：
 
-- `send` / `list` / `ping` HTTP 端点（`/interconnect/*`）：跨实例、跨机器投递消息、枚举 live session、探测活性
-- `/interconnect/link` WebSocket 端点：双向实时事件推流，含心跳与指数退避重连
+- 全走持久 WebSocket 链接：跨实例、跨机器投递消息、枚举 live session、探测活性（`send`/`reply`/`ping`/`list` 经 `/interconnect/link` 的 `msg`/`query` 帧）
+- `/interconnect/link` WebSocket 端点：双向实时事件推流，含心跳与指数退避重连；也承载
+  `send`/`reply` 消息（`msg`/`msg-result` 帧，WS 优先 + HTTP 回退）
 - 事件 fan-out（HTTP + WebSocket），入站事件以 `interconnect/event` 发出
 - 共享密钥鉴权（`DSH_INTERCONNECT_TOKEN`，bearer，fail-closed，timing-safe 比较）
 
@@ -17,13 +18,22 @@
 - `interconnect_send`：向对端实例的指定 session 投递消息；可选 `delivery` 选投递模式、`resume` 唤醒离线 session
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
+- `interconnect_reply`：向记录过的发送方回传消息，只需本机 session id + 文本，无需再次寻址
 
 ## 用法
 
-### 寻址
+### 寻址（0.9 起用 instanceId，全走持久链接）
 
-`interconnect_send` 需要一个 session id，而调用方通常并不知道。`interconnect_list` 返回对端
-**当前 live** 的 session，每一行的 `sessionId` 在调用时刻都是合法的投递目标：
+从 0.9 起，**传输只走 WebSocket 持久链接，不再有 HTTP 端点**，寻址参数从 `baseUrl` 改为 `instanceId`：
+
+- `interconnect_send(instanceId="peer", sessionId=..., text=...)`
+- `interconnect_ping(instanceId="peer")`
+- `interconnect_list(instanceId="peer")`
+- `interconnect_reply(sessionId=...)`（只需本地 session，目标从记录的 sender 解析）
+
+`instanceId` 是 `interconnect` 行 `peers` 映射里的键；真正用来拨号的 origin 由该映射的值给出（例如隧道端点 `http://127.0.0.1:13080`），**instanceId 本身从不出现在线上**，也不参与路由——origin 才是唯一的拨号依据。到**未配置 / 未联通**的对端 `send`/`ping`/`list` 返回 `unreachable`（无 HTTP 回退）。
+
+`interconnect_list` 返回对端**当前 live** 的 session，每一行的 `sessionId` 在调用时刻都是合法的投递目标：
 
 ```
 session-264d37b0-…  重构 interconnect 插件  [idle]
@@ -37,6 +47,55 @@ session-b07326da-…                          [running]
 只列 live session 是有意的：`send` 能到达的正好是这些。对端存在但没有运行 agent 的 session
 不会出现在列表里，也收不到消息。
 
+### 回复（`reply`）
+
+`send` 的线负载带一个 `sender` 身份（**无地址**：`instanceId` + `sessionId`），收到消息的
+instance 会按「本地 session id → 该 sender」记下这份身份。之后那个 session 可以只凭**自己的
+session id + 文本**把消息回传给发送方，不用再次给出对端 instanceId 或远程 session id——回信
+走的是本机到那个 instance 的持久链接。
+
+```text
+# 源实例 A 指定目标 B 的 session，并带上自己的身份（无 baseUrl）
+interconnect_send(instanceId="b", sessionId=B-sess, text="…", sender={instanceId:A, sessionId:A-sess})
+
+# B 回传：只给本地 session id + 文本，目标从记录的 sender 解析
+interconnect_reply(sessionId=B-sess, text="reply")
+```
+# B 回传：只给本地 session id + 文本，目标从记录的 sender 解析
+interconnect_reply(sessionId=B-sess, text="reply")
+```
+
+- `sender` 是**自报**的，只用于 reply 归因与寻址，**不是**路由或鉴权依据——连接本身仍由
+  共享密钥在每个 origin 上独立鉴权。
+- 回复的消息也带 `sender`（本机恒带，不再需要配置 origin），所以对话可双向多轮延续。
+- 只有当入站 send **带了 `sender`** 时 reply 才有目标；对端版本没带、或本 session 从未收过
+  互联消息时，`reply` 返回 `delivered: false, reason: "no-sender-known"`。
+- `sender` **不进模型上下文**（和 `source` 一样只落到持久化日志与 UI 归因）——这条消息的
+  内容字面就是 wire 上传来的 `text`，模型看到的仍是普通 user 文本，只是不带任何结构化的
+  发送方标记。
+
+### 消息信道：全走 WS（`msg` / `query` 帧）
+
+从 0.9 起**不再有任何 HTTP 端点**——`send`/`reply`/`ping`/`list` 全部在持久 WebSocket 链路
+（`/interconnect/link`）上完成。`peers` 映射在激活时**自动 `link()` 每个对端**（心跳 + 指数退避
+重连沿用既有实现），寻址按 `instanceId` 查对应链接。
+
+| 帧 | 方向 | 作用 |
+|---|---|---|
+| `hello` | 双方 | 拨号方自报 instance id |
+| `event` | 双方 | 生命周期事件推流 |
+| `msg` | 请求方 → 接收方 | 携带 `kind`（`send`/`reply`）、`sessionId`、`text`、`sender`/`delivery`/`resume`、`reqId` |
+| `msg-result` | 接收方 → 请求方 | 与 `reqId` 对应的 `SendResult` |
+| `query` | 请求方 → 接收方 | `ping` / `list` / `event` 发现与事件查询 |
+| `query-result` | 接收方 → 请求方 | 与 `reqId` 对应的查询结果 |
+
+- **出站**：`interconnect_send`/`interconnect_reply`/`ping`/`list` 都发对应帧并等待匹配 `reqId`
+  的结果（受 `requestTimeoutMs` 约束）。到**未配置或未联通**的对端直接返回 `unreachable`——
+  **没有 HTTP 回退**，这是 0.9 的破坏性变化。
+- **入站**：`msg` 帧走 `deliver`/`reply` 逻辑（sender 记录、subagent 封栏、`no-sender-known`
+  等），结果经同一 socket 回 `msg-result`；`query` 帧回 `query-result`。
+- 心跳与指数退避重连沿用既有实现。
+
 ### 投递失败的原因
 
 `delivered: false` 单独一个布尔值无法据以行动，因为不同失败需要不同应对，所以
@@ -49,6 +108,7 @@ session-b07326da-…                          [running]
 | `resume-refused` | 请求了唤醒，但对端不允许（`allowResume: false`） | 再带 `resume` 也没用 |
 | `resume-failed` | 允许唤醒且尝试了，但没得到 live agent（无此持久化 session，或被别的 owner 持有） | 换目标 |
 | `session-owned-by-subagent` | 该 session 属于 subagent 路由，投递权在它的父 agent | 通过父 agent 触达，别直接投 |
+| `no-sender-known` | `reply` 指向的本地 session 从未记录过发送方（它没收到过带 `sender` 的消息，或对端版本过旧没带 `sender`） | 先用 `interconnect_send` 主动建立联系 |
 
 `reason` 恰好在 `delivered` 为 false 时出现。
 
@@ -94,10 +154,10 @@ context** 拥有，实测确认插件 fiber 被 dispose 时会把 resume 出来�
 
 ```text
 # 唤醒并让对方实际处理（会起一个计费回合）
-interconnect_send(baseUrl, sessionId, text, resume=true, delivery="followup")
+interconnect_send(instanceId="peer", sessionId, text, resume=true, delivery="followup")
 
 # 唤醒但不起回合：只写入上下文，等对方下次被唤醒时一起读
-interconnect_send(baseUrl, sessionId, text, resume=true, delivery="inject")
+interconnect_send(instanceId="peer", sessionId, text, resume=true, delivery="inject")
 ```
 
 已实测：`resume=true` + `inject` 之后目标从非 live 变 live（`interconnect_list` 计数 +1），
@@ -126,9 +186,9 @@ Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedEr
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `instanceId` | `'dsh'` | 本实例自报的 id，出现在 `ping`/`send`/`list` 的回包里。仅诊断用，**不作为路由依据** |
+| `instanceId` | `'dsh'` | 本实例自报的 id，出现在 `ping`/`send`/`list` 的回包里。也作为「对端如何寻址到我」的身份 |
 | `requestTimeoutMs` | `10000` | 出站请求超时，上限 60000 |
-| `peers` | `[]` | 启动时的事件 fan-out 目标；运行时可用 `subscribe()` 增补 |
+| `peers` | `{}` | **对端路由映射**：`{ [对端 instanceId]: 我拨向它的 origin }`，例如隧道端点 `http://127.0.0.1:13080`。激活时对每个对端自动建持久 WS 链；`send`/`reply`/`ping`/`list` 都按 instanceId 走对应链接 |
 | `delivery` | `'followup'` | 入站消息未带 `delivery` 时的默认投递模式 |
 | `allowResume` | `true` | 是否允许发送方用 `resume` 唤醒本机的离线 session |
 
@@ -136,7 +196,9 @@ Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedEr
 - id: interconnect
   config:
     instanceId: my-box
-    peers: ['http://peer-host:3080']
+    peers:
+      peer-a: http://127.0.0.1:13080   # 我拨向对端 peer-a 的 origin
+      peer-b: http://127.0.0.1:13081
     delivery: followup
     allowResume: false   # 拒绝一切唤醒请求
 ```
@@ -187,7 +249,7 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 50/50 单测通过（服务 + 工具）；类型检查、构建均干净。
+- 34/34 单测通过（服务 + 工具）；类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
 - CI（GitHub Actions）：clone 公开 DSH 仓库作为 sibling，跑 `pnpm run check`。
@@ -198,9 +260,13 @@ pnpm run build    # esbuild → lib/
   `{ kind: 'user' }`。负例：把该 source 改回 `kind: 'user'`，对应断言转红。
   **注意 `source` 不进模型上下文**——只有 `role` 和 `content` 会，而 `role` 是 `user`。
   所以这个字段的价值在持久化日志与 UI 归因，接收方的**模型本身分辨不出**消息来自插件。
+  同理，reply 的记录与寻址依赖 `sender`，它同样不进模型上下文。
+- reply 双向多轮延续在**同一测试进程内用真实 WS 双向回环**验证（A→B→A→B），不是 mockout。
 - 每个行为改动都配负例对照（删掉实现使对应断言转红），而不只是「测试通过」。
-  例如：去掉请求处理器的 `await` 会让 25 个测试转红；去掉 `resume` 的发送方 opt-in
-  门或接收方否决门，各让 1 个转红。
+  例如：去掉 `peers` 激活时的自动 `link()`，3 条「自动建链投递 / ping/list / reply 回环」
+  测试转红；去掉 `requestTimeoutMs` 的定时会违反「超时即 unreachable」的契约。
+- WS + instanceId 传输在**真实 WS 链路**上验证：接收方只暴露 upgrade 路由、不暴露任何 HTTP，
+  一条 `send` 仍投递成功——排除了「其实走了 HTTP 回退」的误判（0.9 起根本没有 HTTP）。
 
 ## 许可
 

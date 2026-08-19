@@ -1,42 +1,24 @@
-/** Host half: bearer-auth boundary, envelope dispatch, and peer-session delivery. */
-import { EventEmitter } from 'node:events'
+/** Host half: upgrade auth, WS msg/query frames, and instanceId-addressed delivery. */
 import { createServer } from 'node:http'
-import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import InterconnectService, { INTERCONNECT_CHANNEL, INTERCONNECT_TOKEN_REF } from '../src/interconnect/index.ts'
+import InterconnectService, { INTERCONNECT_TOKEN_REF } from '../src/interconnect/index.ts'
 import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'
 import WebSocket from 'ws'
 
-/** Structural httpServer fake recording the route and upgrade registries this service touches. */
-function fakeHttpServer(routes: WebRoute[], upgrades: WebUpgradeRoute[]): Pick<WebServer, 'register' | 'registerUpgrade'> {
+/** Structural httpServer fake recording the upgrade registries this service touches. */
+function fakeHttpServer(upgrades: WebUpgradeRoute[]): Pick<WebServer, 'registerUpgrade'> {
   return {
-    register(route) {
-      if (routes.some(candidate => candidate.kind === route.kind && candidate.path === route.path)) {
-        throw new Error(`duplicate route ${route.path}`)
-      }
-      routes.push(route)
-      return () => { routes.splice(routes.indexOf(route), 1) }
-    },
     registerUpgrade(route) {
       upgrades.push(route)
       return () => { upgrades.splice(upgrades.indexOf(route), 1) }
     },
-  }
-}
-
-/** A provider whose resolve rejects, modelling a remote/vault backend outage. */
-function rejectingCredentials(): Pick<CredentialProvider, 'resolve'> {
-  return {
-    resolve: async () => { throw new Error('credentials backend unavailable') },
   }
 }
 
@@ -55,8 +37,7 @@ function fakeCredentials(token: string | undefined): Pick<CredentialProvider, 'r
 /**
  * Agent registry fake recording deliveries per session; only liveIds resolve an
  * Agent. `methods` records which Agent method each delivery called, because the
- * three delivery modes differ only in that choice — a fake that aliases them to
- * one recorder cannot observe the mode at all.
+ * three delivery modes differ only in that choice.
  */
 function fakeAgents(
   deliveries: Map<string, string[]>,
@@ -87,20 +68,12 @@ function fakeAgents(
       }
       return {
         id,
-        // The ownership predicate reads `session.header`, so the fake must carry
-        // one; an ordinary session has no subagent origin and no parent.
         session: { id, header: {} },
         followup: record('followup'),
         steer: record('steer'),
         inject: record('inject'),
       } as unknown as Agent
     },
-    /**
-     * Live agents in `liveIds` order. Each carries an `id`, a `session` stub the
-     * projection registry is keyed by (with the `header` the ownership predicate
-     * reads), and a status, so the list endpoint can be exercised without a real
-     * agent loop.
-     */
     list(): Agent[] {
       return [...liveIds].map(id => ({
         id,
@@ -108,50 +81,14 @@ function fakeAgents(
         status: 'idle',
       }) as unknown as Agent)
     },
-    /** No runtime parent owns a plain fake, so nothing is subagent-owned. */
     isOwnedBy: () => false,
   }
 }
 
-/** Bodyless POST with headers, or a JSON POST with a body. */
-function fakeRequest(init: { url: string; headers: Record<string, string>; body?: unknown }): IncomingMessage {
-  const body = init.body === undefined ? null : JSON.stringify(init.body)
-  const stream = Readable.from(body === null ? [] : [Buffer.from(body)])
-  return Object.assign(stream, {
-    url: init.url,
-    method: 'POST',
-    headers: {
-      ...(body === null ? {} : { 'content-type': 'application/json' }),
-      ...init.headers,
-    },
-  }) as unknown as IncomingMessage
-}
-
-/** Response recorder compatible with this service's writeHead/end sequence. */
-function fakeResponse(): { response: ServerResponse; state: { status?: number; body?: string } } {
-  const state: { status?: number; body?: string } = {}
-  const chunks: Buffer[] = []
-  const response = Object.assign(new EventEmitter(), {
-    writeHead(value: number) { state.status = value; return this },
-    end(this: { writableEnded: boolean }, value?: unknown) {
-      if (typeof value === 'string' || value instanceof Uint8Array) chunks.push(Buffer.from(value as string))
-      if (chunks.length > 0) state.body = Buffer.concat(chunks).toString()
-      this.writableEnded = true
-      return this
-    },
-  }) as unknown as ServerResponse
-  return { response, state }
-}
-
 const SESSION_ID = 'session-1'
 
-function envelope(method: string, payload: unknown) {
-  return { type: 'client-request', rpcId: 'rpc-1', method, payload }
-}
-
-async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: string[] = [], delivery: DeliveryMode = 'followup', allowResume = true): Promise<{
+async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: Record<string, string> = {}, delivery: DeliveryMode = 'followup', allowResume = true, instanceId = 'test-instance'): Promise<{
   ctx: Context
-  routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   deliveries: Map<string, string[]>
   sources: Map<string, MessageSource[]>
@@ -159,19 +96,23 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   dispose: () => Promise<void>
 }> {
   const ctx = new Context()
-  const routes: WebRoute[] = []
   const upgrades: WebUpgradeRoute[] = []
   const deliveries = new Map<string, string[]>()
   const sources = new Map<string, MessageSource[]>()
   const methods = new Map<string, string[]>()
-  ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+  ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
   ctx.provide('agents', fakeAgents(deliveries, liveIds, sources, methods))
   ctx.provide('credentials', fakeCredentials(token) as CredentialProvider)
-  const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000, peers, delivery, allowResume })
+  const fiber = ctx.plugin(InterconnectService, {
+    instanceId,
+    requestTimeoutMs: 10000,
+    peers,
+    delivery,
+    allowResume,
+  })
   await fiber.await()
   return {
     ctx,
-    routes,
     upgrades,
     deliveries,
     sources,
@@ -180,985 +121,53 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   }
 }
 
+/** Serve one upgrade route over a real HTTP server and return its port. */
+async function serveUpgrade(upgrades: WebUpgradeRoute[]): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = createServer()
+  server.on('upgrade', (req, socket, head) => {
+    void upgrades[0]!.handler(req, socket, head)
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address() as AddressInfo
+  return {
+    port: address.port,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error === undefined) resolve()
+        else reject(error)
+      })
+    }),
+  }
+}
+
+/** Open a raw WS client to a served upgrade route, collecting incoming frames. */
+async function dial(
+  port: number,
+  token = 'secret',
+): Promise<{ client: WebSocket; frames: Record<string, unknown>[]; waitOpen: Promise<void> }> {
+  const client = new WebSocket(`ws://127.0.0.1:${String(port)}/interconnect/link`, {
+    headers: { authorization: `Bearer ${token}` },
+  })
+  const frames: Record<string, unknown>[] = []
+  client.on('message', (data) => {
+    const text = Array.isArray(data)
+      ? Buffer.concat(data).toString('utf8')
+      : Buffer.isBuffer(data)
+        ? data.toString('utf8')
+        : Buffer.from(data).toString('utf8')
+    frames.push(JSON.parse(text))
+  })
+  const waitOpen = new Promise<void>((resolve, reject) => {
+    client.once('open', resolve)
+    client.once('error', reject)
+  })
+  return { client, frames, waitOpen }
+}
+
+const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
 describe('interconnect host half', () => {
-  it('registers the /interconnect prefix route and removes it with the fiber', async () => {
-    const { routes, dispose } = await mounted('secret')
-    expect(routes).toHaveLength(1)
-    expect(routes[0]).toMatchObject({ kind: 'prefix', path: INTERCONNECT_CHANNEL })
-    await dispose()
-    expect(routes).toHaveLength(0)
-  })
-
-  it('fails closed when the token is unconfigured', async () => {
-    const { routes, dispose } = await mounted(undefined)
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({ url: `${INTERCONNECT_CHANNEL}/ping`, headers: { authorization: 'Bearer whatever' } }),
-      response,
-    )
-    expect(state.status).toBe(403)
-    expect(state.body).toBe('forbidden')
-    await dispose()
-  })
-
-  it('rejects a missing or wrong bearer token before any envelope dispatch', async () => {
-    const { routes, dispose } = await mounted('secret')
-    for (const authorization of [undefined, 'Bearer wrong', 'secret', '']) {
-      const { response, state } = fakeResponse()
-      const headers: Record<string, string> = authorization === undefined ? {} : { authorization }
-      await routes[0]!.handler(
-        fakeRequest({ url: `${INTERCONNECT_CHANNEL}/ping`, headers, body: {} }),
-        response,
-      )
-      expect(state.status).toBe(401)
-      expect(state.body).toBe('unauthorized')
-    }
-    await dispose()
-  })
-
-  it('answers ping for an authenticated caller', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/ping`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('ping', {}),
-      }),
-      response,
-    )
-    expect(state.status).toBe(200)
-    expect(JSON.parse(state.body!)).toMatchObject({
-      type: 'server-response',
-      rpcId: 'rpc-1',
-      result: { ok: true, value: { pong: true, instance: 'test-instance' } },
-    })
-    await dispose()
-  })
-
-  it('attributes a delivered message to the plugin, never to the human user', async () => {
-    const { routes, sources, dispose } = await mounted('secret')
-    const { response } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'hello peer' }),
-      }),
-      response,
-    )
-    const recorded = sources.get(SESSION_ID)
-    expect(recorded).toHaveLength(1)
-    // A receiving agent must be able to tell a cross-instance handoff from text
-    // the local operator typed, so `kind: 'user'` is specifically wrong here.
-    expect(recorded![0]).toEqual({
-      kind: 'plugin',
-      plugin: 'dsh-interconnect',
-      form: 'notice',
-      summary: 'interconnect handoff delivered on instance test-instance',
-    })
-    await dispose()
-  })
-
-  it('delivers a send into the target live session and reports it', async () => {
-    const { routes, deliveries, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'hello peer' }),
-      }),
-      response,
-    )
-    expect(deliveries.get(SESSION_ID)).toEqual(['hello peer'])
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: true, instance: 'test-instance' } },
-    })
-    await dispose()
-  })
-
-  it('delivers via inject instead of followup when delivery is inject', async () => {
-    const { routes, deliveries, methods, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'inject')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'quiet inject' }),
-      }),
-      response,
-    )
-    expect(deliveries.get(SESSION_ID)).toEqual(['quiet inject'])
-    // Assert the method, not just the text: all three modes deliver the same
-    // text and differ only in which Agent method they call.
-    expect(methods.get(SESSION_ID)).toEqual(['inject'])
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: true, delivery: 'inject' } },
-    })
-    await dispose()
-  })
-
-  it('delivers via steer when the configured default is steer', async () => {
-    const { routes, methods, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'steer')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'cut in' }),
-      }),
-      response,
-    )
-    expect(methods.get(SESSION_ID)).toEqual(['steer'])
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: true, delivery: 'steer' } },
-    })
-    await dispose()
-  })
-
-  it('lets one message override the configured mode and steer into a running turn', async () => {
-    // Configured default is followup; the message asks for steer.
-    const { routes, methods, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'urgent', delivery: 'steer' }),
-      }),
-      response,
-    )
-    expect(methods.get(SESSION_ID)).toEqual(['steer'])
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: true, delivery: 'steer' } },
-    })
-    await dispose()
-  })
-
-  it('falls back to the configured mode when a message omits the override', async () => {
-    const { routes, methods, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'inject')
-    const { response } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'no override' }),
-      }),
-      response,
-    )
-    expect(methods.get(SESSION_ID)).toEqual(['inject'])
-    await dispose()
-  })
-
-  it('rejects an unknown delivery mode instead of delivering it', async () => {
-    const { routes, methods, deliveries, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'bad mode', delivery: 'cancel' }),
-      }),
-      response,
-    )
-    // An unvalidated mode would reach a method lookup on Agent, so the envelope
-    // must fail before any delivery happens.
-    expect(methods.get(SESSION_ID)).toBeUndefined()
-    expect(deliveries.get(SESSION_ID)).toBeUndefined()
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: false },
-    })
-    await dispose()
-  })
-
-  it('reports not delivered for an absent session without throwing, naming the cause', async () => {
-    const { routes, deliveries, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'missing', text: 'hello' }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      // The receiver answered, so the id is simply not live here — distinct from
-      // a receiver that never answered at all.
-      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
-    })
-    expect(deliveries.size).toBe(0)
-    await dispose()
-  })
-
-  it('does not wake a persisted session unless the sender asks', async () => {
-    // The lookup is present and would succeed, so this pins the OPT-IN itself:
-    // absent `resume`, waking must not be attempted at all.
-    const { ctx, routes, deliveries, dispose } = await mounted('secret')
-    let resolveCalls = 0
-    ctx.provide('typert', {
-      lookups: {
-        get: () => ({
-          resolve: async () => {
-            resolveCalls += 1
-            return { followup: () => {}, id: 'woken' }
-          },
-        }),
-      },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'persisted-only', text: 'hi' }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
-    })
-    expect(resolveCalls).toBe(0)
-    expect(deliveries.size).toBe(0)
-    await dispose()
-  })
-
-  it('wakes a persisted session through the host lookup when the sender opts in', async () => {
-    const { ctx, routes, dispose } = await mounted('secret')
-    const delivered: string[] = []
-    let askedFor: string | undefined
-    ctx.provide('typert', {
-      lookups: {
-        get: (key: string) => (key !== 'agent' ? undefined : {
-          resolve: async (id: string) => {
-            askedFor = id
-            // Stand in for the Host's resolver: it owns the resumed agent.
-            return {
-              session: { header: {} },
-              followup: (message: { content: { text: string }[] }) => { delivered.push(message.content[0]!.text) },
-            }
-          },
-        }),
-      },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'persisted-only', text: 'wake up', resume: true }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: true, delivery: 'followup' } },
-    })
-    expect(askedFor).toBe('persisted-only')
-    expect(delivered).toEqual(['wake up'])
-    await dispose()
-  })
-
-  it('lets the receiver refuse waking even when the sender asks', async () => {
-    const { ctx, routes, dispose } = await mounted('secret', new Set([SESSION_ID]), [], 'followup', false)
-    let resolveCalls = 0
-    ctx.provide('typert', {
-      lookups: { get: () => ({ resolve: async () => { resolveCalls += 1; return {} } }) },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'persisted-only', text: 'hi', resume: true }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false, reason: 'resume-refused' } },
-    })
-    // Refusal must short-circuit before the lookup runs: the cost is the point.
-    expect(resolveCalls).toBe(0)
-    await dispose()
-  })
-
-  it('degrades to not-live when no host lookup is mounted', async () => {
-    // A headless profile has no api-proxy, so waking is simply unavailable.
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'persisted-only', text: 'hi', resume: true }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
-    })
-    await dispose()
-  })
-
-  it('reports session-not-live when the lookup cannot resume, rather than blaming a failed resume', async () => {
-    // Without api-proxy the base `agent` provider is a plain registry read
-    // (`agents.get`), so it answers undefined for anything not already live and
-    // can never resume. That is "not live here", not "waking was attempted and
-    // failed" — the two send the caller in different directions.
-    const { ctx, routes, dispose } = await mounted('secret')
-    ctx.provide('typert', {
-      lookups: { get: () => ({ resolve: async () => undefined }) },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'never-live', text: 'hi', resume: true }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false, reason: 'session-not-live' } },
-    })
-    await dispose()
-  })
-
-  it('reports resume-failed when the lookup refuses or finds nothing', async () => {
-    const { ctx, routes, dispose } = await mounted('secret')
-    ctx.provide('typert', {
-      lookups: {
-        get: () => ({ resolve: async () => { throw new Error('subagent owner holds it') } }),
-      },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'owned-elsewhere', text: 'hi', resume: true }),
-      }),
-      response,
-    )
-    // A refusing resolver is an expected outcome, so the call still answers ok.
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false, reason: 'resume-failed' } },
-    })
-    await dispose()
-  })
-
-  it('prefers an already-live agent over waking anything', async () => {
-    const { ctx, routes, deliveries, dispose } = await mounted('secret')
-    let resolveCalls = 0
-    ctx.provide('typert', {
-      lookups: { get: () => ({ resolve: async () => { resolveCalls += 1; return {} } }) },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'hi', resume: true }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({ result: { ok: true, value: { delivered: true } } })
-    expect(resolveCalls).toBe(0)
-    expect(deliveries.get(SESSION_ID)).toEqual(['hi'])
-    await dispose()
-  })
-
-  it('refuses to deliver into a session reserved to subagent routing', async () => {
-    // A subagent child is delivered to by its parent; splicing in from here
-    // would race that parent, so the live-hit path must be fenced too.
-    const ctx = new Context()
-    const routes: WebRoute[] = []
-    const upgrades: WebUpgradeRoute[] = []
-    const spliced: string[] = []
-    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-    ctx.provide('agents', {
-      get: () => ({
-        id: 'child',
-        session: { header: { origin: 'subagent' } },
-        followup: () => { spliced.push('leaked') },
-      }) as unknown as Agent,
-      isOwnedBy: () => false,
-    })
-    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
-    const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
-    await fiber.await()
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 'child', text: 'hi' }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: true, value: { delivered: false, reason: 'session-owned-by-subagent' } },
-    })
-    // The message must not reach the inbox at all.
-    expect(spliced).toEqual([])
-    await fiber.dispose()
-  })
-
-  it('omits subagent-owned sessions from the listing it advertises', async () => {
-    // Advertising a row `send` would refuse makes the listing self-contradictory.
-    const ctx = new Context()
-    const routes: WebRoute[] = []
-    const upgrades: WebUpgradeRoute[] = []
-    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-    ctx.provide('agents', {
-      get: () => undefined,
-      list: () => [
-        { id: 'plain', session: { id: 'plain', header: {} }, status: 'idle' },
-        { id: 'child', session: { id: 'child', header: { origin: 'subagent' } }, status: 'running' },
-      ] as unknown as Agent[],
-      isOwnedBy: () => false,
-    })
-    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
-    const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
-    await fiber.await()
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/list`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('list', {}),
-      }),
-      response,
-    )
-    const ids = (JSON.parse(state.body!) as {
-      result: { value: { sessions: { sessionId: string }[] } }
-    }).result.value.sessions.map(s => s.sessionId)
-    expect(ids).toEqual(['plain'])
-    await fiber.dispose()
-  })
-
-  it('omits the failure reason when delivery succeeds', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'hello' }),
-      }),
-      response,
-    )
-    const value = (JSON.parse(state.body!) as {
-      result: { value: Record<string, unknown> }
-    }).result.value
-    expect(value.delivered).toBe(true)
-    expect('reason' in value).toBe(false)
-    await dispose()
-  })
-
-  it('rejects a malformed send payload as a bad request, not an internal error', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: 42 }),
-      }),
-      response,
-    )
-    expect(state.status).toBe(200)
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: false, error: { code: 'bad-request' } },
-    })
-    await dispose()
-  })
-
-  it('reports an unknown delivery mode as a bad request naming the accepted modes', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'hi', delivery: 'bogus' }),
-      }),
-      response,
-    )
-    const parsed = JSON.parse(state.body!) as {
-      result: { ok: boolean; error: { code: string; message: string } }
-    }
-    expect(parsed.result.ok).toBe(false)
-    expect(parsed.result.error.code).toBe('bad-request')
-    expect(parsed.result.error.message).toContain('followup')
-    expect(parsed.result.error.message).toContain('steer')
-    expect(parsed.result.error.message).toContain('inject')
-    await dispose()
-  })
-
-  it('lists live sessions so a sender can discover targets without knowing an id', async () => {
-    const { ctx, routes, dispose } = await mounted('secret', new Set(['session-a', 'session-b']))
-    ctx.provide('sessionProjections', {
-      snapshot: (session: { id: string }) => ({
-        asOfSeq: 1,
-        values: session.id === 'session-a' ? { title: 'first session' } : {},
-      }),
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/list`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('list', {}),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: {
-        ok: true,
-        value: {
-          instance: 'test-instance',
-          sessions: [
-            // A titled session reports its title; an untitled one omits the key
-            // entirely so "untitled" stays distinguishable from "unavailable".
-            { sessionId: 'session-a', title: 'first session', status: 'idle' },
-            { sessionId: 'session-b', status: 'idle' },
-          ],
-        },
-      },
-    })
-    const [rowA, rowB] = (JSON.parse(state.body!) as {
-      result: { value: { sessions: Record<string, unknown>[] } }
-    }).result.value.sessions
-    expect(rowA).toHaveProperty('title')
-    expect(rowB).not.toHaveProperty('title')
-    await dispose()
-  })
-
-  it('lists sessions without titles when no projection service is mounted', async () => {
-    // A receiver that never registered a title projection must still answer the
-    // ids, because the ids are what `send` needs.
-    const { routes, dispose } = await mounted('secret', new Set(['session-a']))
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/list`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('list', {}),
-      }),
-      response,
-    )
-    const parsed = JSON.parse(state.body!) as {
-      result: { ok: boolean; value: { sessions: Record<string, unknown>[] } }
-    }
-    expect(parsed.result.ok).toBe(true)
-    expect(parsed.result.value.sessions).toEqual([{ sessionId: 'session-a', status: 'idle' }])
-    await dispose()
-  })
-
-  it('still lists a session whose title projection throws', async () => {
-    const { ctx, routes, dispose } = await mounted('secret', new Set(['session-a']))
-    ctx.provide('sessionProjections', {
-      snapshot: () => { throw new Error('projection exploded') },
-    })
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/list`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('list', {}),
-      }),
-      response,
-    )
-    const parsed = JSON.parse(state.body!) as {
-      result: { ok: boolean; value: { sessions: Record<string, unknown>[] } }
-    }
-    expect(parsed.result.ok).toBe(true)
-    expect(parsed.result.value.sessions).toEqual([{ sessionId: 'session-a', status: 'idle' }])
-    await dispose()
-  })
-
-  it('requires the shared token for the list endpoint', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/list`,
-        headers: {},
-        body: envelope('list', {}),
-      }),
-      response,
-    )
-    expect(state.status).toBe(401)
-    await dispose()
-  })
-
-  it('404s an unknown endpoint and a non-POST method', async () => {
-    const { routes, dispose } = await mounted('secret')
-    for (const url of [`${INTERCONNECT_CHANNEL}/nope`, '/other/ping']) {
-      const { response, state } = fakeResponse()
-      await routes[0]!.handler(
-        fakeRequest({ url, headers: { authorization: 'Bearer secret' }, body: envelope('nope', {}) }),
-        response,
-      )
-      expect(state.status).toBe(404)
-    }
-    await dispose()
-  })
-})
-
-describe('interconnect event notification', () => {
-  /** Fire one local agent/status event with a fake agent carrying the session id. */
-  function emitAgentStatus(ctx: Context, sessionId: string, status: 'idle' | 'running'): void {
-    const agent = {
-      id: SessionId(sessionId),
-      session: { id: SessionId(sessionId), header: {} },
-    } as Agent
-    ctx.emit('agent/status', { agent, status })
-  }
-
-  it('emits interconnect/event locally for an authenticated inbound event', async () => {
-    const { ctx, routes, dispose } = await mounted('secret')
-    const received: [EventNotification, string][] = []
-    ctx.on('interconnect/event', (notification, sender) => { received.push([notification, sender]) })
-
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/event`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('event', {
-          sender: 'peer-instance',
-          notification: { kind: 'agent/status', sessionId: 's-1', status: 'running' },
-        }),
-      }),
-      response,
-    )
-    expect(state.status).toBe(200)
-    expect(JSON.parse(state.body!)).toMatchObject({ result: { ok: true, value: { accepted: true } } })
-    expect(received).toEqual([[
-      { kind: 'agent/status', sessionId: 's-1', status: 'running' },
-      'peer-instance',
-    ]])
-    await dispose()
-  })
-
-  it('still answers internal for a genuine delivery fault, so bad-request stays caller-only', async () => {
-    // Distinguishes the two failure classes: an unusable payload is the
-    // caller's fault (bad-request), while an agent method that throws is this
-    // instance's fault and must keep reporting internal.
-    const ctx = new Context()
-    const routes: WebRoute[] = []
-    const upgrades: WebUpgradeRoute[] = []
-    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-    ctx.provide('agents', {
-      get: () => ({
-        session: { header: {} },
-        followup: () => { throw new Error('inbox exploded') },
-      }) as unknown as Agent,
-      isOwnedBy: () => false,
-    })
-    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
-    const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
-    await fiber.await()
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/send`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('send', { sessionId: SESSION_ID, text: 'hi' }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({
-      result: { ok: false, error: { code: 'internal', message: 'inbox exploded' } },
-    })
-    await fiber.dispose()
-  })
-
-  it('rejects a malformed inbound event payload as a bad request', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { response, state } = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({
-        url: `${INTERCONNECT_CHANNEL}/event`,
-        headers: { authorization: 'Bearer secret' },
-        body: envelope('event', { sender: 'peer', notification: { kind: 'nope' } }),
-      }),
-      response,
-    )
-    expect(JSON.parse(state.body!)).toMatchObject({ result: { ok: false, error: { code: 'bad-request' } } })
-    await dispose()
-  })
-
-  it('fans local events out to configured peers over real HTTP', async () => {
-    // The receiving peer is a bare HTTP server capturing what reaches /interconnect/event.
-    const received: unknown[] = []
-    const peerServer = createServer((request, response) => {
-      const chunks: Buffer[] = []
-      request.on('data', (chunk: Buffer) => { chunks.push(chunk) })
-      request.on('end', () => {
-        if (request.url?.startsWith(`${INTERCONNECT_CHANNEL}/event`)) {
-          received.push(JSON.parse(Buffer.concat(chunks).toString()))
-        }
-        response.writeHead(200, { 'content-type': 'application/json' })
-        response.end(JSON.stringify({ type: 'server-response', rpcId: 'rpc-1', result: { ok: true, value: { accepted: true } } }))
-      })
-    })
-    await new Promise<void>(resolve => peerServer.listen(0, '127.0.0.1', resolve))
-    const peerPort = (peerServer.address() as AddressInfo).port
-    const peerUrl = `http://127.0.0.1:${String(peerPort)}`
-
-    const { ctx, dispose } = await mounted('secret', new Set([SESSION_ID]), [peerUrl])
-    try {
-      emitAgentStatus(ctx, SESSION_ID, 'running')
-      // The fan-out is fire-and-forget; give the in-flight POST a moment to land.
-      await new Promise<void>(resolve => setTimeout(resolve, 100))
-      expect(received).toHaveLength(1)
-      expect(received[0]).toMatchObject({
-        method: 'event',
-        payload: {
-          sender: 'test-instance',
-          notification: { kind: 'agent/status', sessionId: SESSION_ID, status: 'running' },
-        },
-      })
-    } finally {
-      await dispose()
-      await new Promise<void>((resolve, reject) => {
-        peerServer.close((error) => {
-          if (error === undefined) resolve()
-          else reject(error)
-        })
-      })
-    }
-  })
-})
-
-describe('interconnect resilience to a failing credentials provider', () => {
-  /** Collect unhandled rejections for the duration of one body. */
-  async function withUnhandledRejectionWatch(body: () => Promise<void>): Promise<unknown[]> {
-    const seen: unknown[] = []
-    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
-    process.on('unhandledRejection', onUnhandled)
-    try {
-      await body()
-      // Unhandled rejections are reported a macrotask after they settle.
-      await new Promise(resolve => setTimeout(resolve, 50))
-    } finally {
-      process.off('unhandledRejection', onUnhandled)
-    }
-    return seen
-  }
-
-  it('does not raise an unhandled rejection when fan-out cannot read the token', async () => {
-    // The fan-out runs from a lifecycle listener; an escaping rejection there
-    // would terminate the process over a notification nobody awaited.
-    const seen = await withUnhandledRejectionWatch(async () => {
-      const ctx = new Context()
-      const routes: WebRoute[] = []
-      const upgrades: WebUpgradeRoute[] = []
-      ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-      ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
-      ctx.provide('credentials', rejectingCredentials() as CredentialProvider)
-      const fiber = ctx.plugin(InterconnectService, {
-        instanceId: 'test-instance',
-        requestTimeoutMs: 10000,
-        peers: ['http://peer.invalid:9001'],
-      })
-      await fiber.await()
-      // Drive one fan-out through a real lifecycle event.
-      ctx.emit('agent/created', { agent: { session: { id: SESSION_ID } } } as never)
-      await new Promise(resolve => setTimeout(resolve, 20))
-      await fiber.dispose()
-    })
-    expect(seen).toEqual([])
-  })
-
-  it('answers 403 and closes the socket when an upgrade cannot read the token', async () => {
-    const seen = await withUnhandledRejectionWatch(async () => {
-      const ctx = new Context()
-      const routes: WebRoute[] = []
-      const upgrades: WebUpgradeRoute[] = []
-      ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-      ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
-      ctx.provide('credentials', rejectingCredentials() as CredentialProvider)
-      const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
-      await fiber.await()
-      const written: string[] = []
-      const socket = { end: (chunk?: string) => { if (chunk !== undefined) written.push(chunk) } }
-      // The production caller invokes this as `void handleUpgrade(...)`.
-      upgrades[0]!.handler(
-        { headers: { authorization: 'Bearer secret' }, url: `${INTERCONNECT_CHANNEL}/link` } as never,
-        socket as never,
-        Buffer.alloc(0),
-      )
-      await new Promise(resolve => setTimeout(resolve, 20))
-      // Fail closed rather than hang the client on an open socket.
-      expect(written.join('')).toContain('403')
-      await fiber.dispose()
-    })
-    expect(seen).toEqual([])
-  })
-  it('keeps the dial loop alive and silent when the token read rejects', async () => {
-    // No socket is created when the token read fails, so no `close` event will
-    // arrive to schedule the retry: without its own catch the link would stay
-    // down until a restart, and the rejection would escape unhandled.
-    const seen = await withUnhandledRejectionWatch(async () => {
-      const ctx = new Context()
-      const routes: WebRoute[] = []
-      const upgrades: WebUpgradeRoute[] = []
-      ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-      ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
-      ctx.provide('credentials', rejectingCredentials() as CredentialProvider)
-      const fiber = ctx.plugin(InterconnectService, { instanceId: 'test-instance', requestTimeoutMs: 10000 })
-      await fiber.await()
-      const handle = ctx.interconnect.link('http://peer.invalid:9001')
-      await new Promise(resolve => setTimeout(resolve, 30))
-      // Closing must remain possible after a failed dial.
-      handle.close()
-      await fiber.dispose()
-    })
-    expect(seen).toEqual([])
-  })
-})
-
-describe('interconnect over a real HTTP server', () => {
-  async function serve(routes: WebRoute[]): Promise<{ port: number; close: () => Promise<void> }> {
-    const server = createServer((request, response) => {
-      void routes[0]!.handler(request, response)
-    })
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-    const address = server.address() as AddressInfo
-    return {
-      port: address.port,
-      close: () => new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error === undefined) resolve()
-          else reject(error)
-        })
-      }),
-    }
-  }
-
-  it('round-trips an authenticated ping over real HTTP', async () => {
-    const { routes, dispose } = await mounted('secret')
-    const { port, close } = await serve(routes)
-    try {
-      const response = await fetch(`http://127.0.0.1:${String(port)}${INTERCONNECT_CHANNEL}/ping`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
-        body: JSON.stringify(envelope('ping', {})),
-      })
-      expect(response.status).toBe(200)
-      expect(await response.json()).toMatchObject({
-        result: { ok: true, value: { pong: true, instance: 'test-instance' } },
-      })
-    } finally {
-      await close()
-      await dispose()
-    }
-  })
-  it('carries session-not-live back to the sender across the wire', async () => {
-    // Two mounts: one is the sender's service, the other serves as the peer.
-    const receiver = await mounted('secret')
-    const { port, close } = await serve(receiver.routes)
-    const sender = await mounted('secret')
-    try {
-      const result = await sender.ctx.interconnect.send({
-        baseUrl: `http://127.0.0.1:${String(port)}`,
-        sessionId: 'not-open-anywhere',
-        text: 'hello',
-      })
-      expect(result.delivered).toBe(false)
-      // The peer answered, so the reason is about the target, and the echoed
-      // instance is the RECEIVER's id — not the sender's.
-      expect(result.reason).toBe('session-not-live')
-      expect(result.instance).toBe('test-instance')
-    } finally {
-      await close()
-      await sender.dispose()
-      await receiver.dispose()
-    }
-  })
-
-  it('reports unreachable when the peer origin refuses the connection', async () => {
-    const sender = await mounted('secret')
-    // Bind a port, then close it, so the origin is syntactically valid but dead.
-    const probe = createServer()
-    await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve))
-    const deadPort = (probe.address() as AddressInfo).port
-    await new Promise<void>((resolve, reject) => {
-      probe.close(error => (error === undefined ? resolve() : reject(error)))
-    })
-    try {
-      const result = await sender.ctx.interconnect.send({
-        baseUrl: `http://127.0.0.1:${String(deadPort)}`,
-        sessionId: 'anything',
-        text: 'hello',
-      })
-      expect(result.delivered).toBe(false)
-      // Nothing answered, so no claim is made about the session itself.
-      expect(result.reason).toBe('unreachable')
-    } finally {
-      await sender.dispose()
-    }
-  })
-})
-
-describe('interconnect WebSocket link', () => {
-  /** Serve one upgrade route over a real HTTP server and return its port. */
-  async function serveUpgrade(upgrades: WebUpgradeRoute[]): Promise<{ port: number; close: () => Promise<void> }> {
-    const server = createServer()
-    server.on('upgrade', (req, socket, head) => {
-      void upgrades[0]!.handler(req, socket, head)
-    })
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-    const address = server.address() as AddressInfo
-    return {
-      port: address.port,
-      close: () => new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error === undefined) resolve()
-          else reject(error)
-        })
-      }),
-    }
-  }
-
-  it('survives a local listener that throws on a peer-pushed event', async () => {
-    // Cordis propagates a listener throw back to the emitter, and this emit runs
-    // inside the socket's synchronous message handler — so without a guard any
-    // remote peer could kill this process by pushing an event a local listener
-    // mishandles.
-    const { ctx, upgrades, dispose } = await mounted('secret')
-    const { port, close } = await serveUpgrade(upgrades)
-    const uncaught: unknown[] = []
-    const onUncaught = (error: unknown): void => { uncaught.push(error) }
-    process.on('uncaughtException', onUncaught)
-    ctx.on('interconnect/event', () => { throw new Error('listener exploded') })
-    const client = new WebSocket(`ws://127.0.0.1:${String(port)}/interconnect/link`, {
-      headers: { authorization: 'Bearer secret' },
-    })
-    try {
-      await new Promise<void>((resolve, reject) => {
-        client.once('open', resolve)
-        client.once('error', reject)
-      })
-      client.send(JSON.stringify({ type: 'hello', sender: 'dialer-x' }))
-      client.send(JSON.stringify({ type: 'event', notification: { kind: 'agent/status', sessionId: 's-1', status: 'running' } }))
-      await new Promise<void>(resolve => setTimeout(resolve, 80))
-      expect(uncaught).toEqual([])
-      // The link must stay usable after the listener failure.
-      expect(client.readyState).toBe(WebSocket.OPEN)
-    } finally {
-      process.off('uncaughtException', onUncaught)
-      client.terminate()
-      await close()
-      await dispose()
-    }
-  })
-
-  it('registers one /interconnect/link upgrade route and removes it with the fiber', async () => {
+  it('registers the /interconnect/link upgrade route and removes it with the fiber', async () => {
     const { upgrades, dispose } = await mounted('secret')
     expect(upgrades).toHaveLength(1)
     expect(upgrades[0]).toMatchObject({ path: '/interconnect/link' })
@@ -1166,55 +175,232 @@ describe('interconnect WebSocket link', () => {
     expect(upgrades).toHaveLength(0)
   })
 
-  it('announces hello to an authenticated dialer and receives its event frames', async () => {
-    const { ctx, upgrades, dispose } = await mounted('secret')
-    const { port, close } = await serveUpgrade(upgrades)
-    const received: [EventNotification, string][] = []
-    ctx.on('interconnect/event', (notification, sender) => { received.push([notification, sender]) })
-
-    const client = new WebSocket(`ws://127.0.0.1:${String(port)}/interconnect/link`, {
-      headers: { authorization: 'Bearer secret' },
-    })
-    const frames: unknown[] = []
-    client.on('message', (data: import('ws').RawData) => {
-      const text = Array.isArray(data)
-        ? Buffer.concat(data).toString('utf8')
-        : Buffer.isBuffer(data)
-          ? data.toString('utf8')
-          : Buffer.from(data).toString('utf8')
-      frames.push(JSON.parse(text))
-    })
-    await new Promise<void>((resolve, reject) => {
-      client.once('open', resolve)
-      client.once('error', reject)
-    })
-    // The server announces its identity over the link.
-    await new Promise<void>(resolve => setTimeout(resolve, 50))
-    expect(frames).toContainEqual({ type: 'hello', sender: 'test-instance' })
-
-    // Client announces its identity, then pushes an event; the server attributes
-    // the event to the announced peer.
-    client.send(JSON.stringify({ type: 'hello', sender: 'dialer-x' }))
-    client.send(JSON.stringify({ type: 'event', notification: { kind: 'agent/status', sessionId: 's-1', status: 'running' } }))
-    await new Promise<void>(resolve => setTimeout(resolve, 50))
-    expect(received).toEqual([[
-      { kind: 'agent/status', sessionId: 's-1', status: 'running' },
-      'dialer-x',
-    ]])
-
-    client.terminate()
-    await close()
+  it('registers no HTTP prefix route when transport is WS-only', async () => {
+    const { upgrades, dispose } = await mounted('secret')
+    // Only the upgrade route exists; there is no /interconnect prefix handler.
+    expect(upgrades).toHaveLength(1)
     await dispose()
   })
 
   it('rejects an upgrade without a valid bearer token', async () => {
     const { upgrades, dispose } = await mounted('secret')
     const { port, close } = await serveUpgrade(upgrades)
-    const client = new WebSocket(`ws://127.0.0.1:${String(port)}/interconnect/link`)
-    const err = new Promise<Error>((resolve) => { client.once('error', resolve) })
-    await err
+    // Wrong token: the server rejects the upgrade before accepting the socket.
+    const client = new WebSocket(`ws://127.0.0.1:${String(port)}/interconnect/link`, {
+      headers: { authorization: 'Bearer wrong' },
+    })
+    const err = await new Promise<Error>((resolve) => { client.once('error', resolve) })
+    expect(err).toBeDefined()
     client.terminate()
     await close()
     await dispose()
+  })
+})
+
+describe('interconnect over real WS links', () => {
+  it('links a configured peer automatically and delivers a send over the link', async () => {
+    const receiver = await mounted('secret', new Set(['R-sess']))
+    const r = await serveUpgrade(receiver.upgrades)
+    const rUrl = `http://127.0.0.1:${String(r.port)}`
+    const sender = await mounted('secret', new Set([]), { 'peer-b': rUrl })
+    try {
+      await wait(200) // let the auto-link dial + hello land
+      const result = await sender.ctx.interconnect.send({
+        instanceId: 'peer-b',
+        sessionId: 'R-sess',
+        text: 'via link',
+      })
+      expect(result.delivered).toBe(true)
+      expect(receiver.deliveries.get('R-sess')).toEqual(['via link'])
+    } finally {
+      await sender.dispose()
+      await r.close()
+      await receiver.dispose()
+    }
+  })
+
+  it('reports unreachable for a send to a peer with no live link (not configured/connected)', async () => {
+    const sender = await mounted('secret', new Set([]))
+    // No peer route for 'missing' was configured, so no link exists here.
+    const result = await sender.ctx.interconnect.send({
+      instanceId: 'missing',
+      sessionId: 'X-sess',
+      text: 'hello',
+    })
+    expect(result.delivered).toBe(false)
+    expect(result.reason).toBe('unreachable')
+    await sender.dispose()
+  })
+
+  it('answers ping and list for a configured peer over the link', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]))
+    const r = await serveUpgrade(receiver.upgrades)
+    const rUrl = `http://127.0.0.1:${String(r.port)}`
+    const sender = await mounted('secret', new Set([]), { 'peer-b': rUrl })
+    try {
+      await wait(200)
+      const ping = await sender.ctx.interconnect.ping('peer-b')
+      expect(ping?.pong).toBe(true)
+      expect(ping?.instance).toBe('test-instance')
+      const list = await sender.ctx.interconnect.list('peer-b')
+      expect(list?.sessions.map(s => s.sessionId)).toContain(SESSION_ID)
+    } finally {
+      await sender.dispose()
+      await r.close()
+      await receiver.dispose()
+    }
+  })
+
+  it('returns undefined for ping/list to a peer with no live link', async () => {
+    const sender = await mounted('secret', new Set([]))
+    expect(await sender.ctx.interconnect.ping('missing')).toBeUndefined()
+    expect(await sender.ctx.interconnect.list('missing')).toBeUndefined()
+    await sender.dispose()
+  })
+
+  it('records a sender on an inbound send and replies back over a live link', async () => {
+    // B receives a send from A; B then replies to A, which A delivers. Both
+    // sides link each other so the reply can flow back.
+    const a = await mounted('secret', new Set(['A-sess']), {}, 'followup', true, 'inst-a')
+    const aServ = await serveUpgrade(a.upgrades)
+    const aUrl = `http://127.0.0.1:${String(aServ.port)}`
+    const b = await mounted('secret', new Set(['B-sess']), { 'inst-a': aUrl }, 'followup', true, 'inst-b')
+    const bServ = await serveUpgrade(b.upgrades)
+    const bUrl = `http://127.0.0.1:${String(bServ.port)}`
+    a.ctx.interconnect.link('inst-b', bUrl) // A links back to B
+    try {
+      await wait(250) // both links dial + hello
+      const sent = await b.ctx.interconnect.send({
+        instanceId: 'inst-a',
+        sessionId: 'A-sess',
+        text: 'hi A',
+        sender: b.ctx.interconnect.selfSender('B-sess'),
+      })
+      expect(sent.delivered).toBe(true)
+      // A received "hi A"; A's senders recorded B. A replies back to B.
+      expect(a.deliveries.get('A-sess')).toEqual(['hi A'])
+      const replied = await a.ctx.interconnect.reply({ sessionId: 'A-sess', text: 'hi B' })
+      expect(replied.delivered).toBe(true)
+      expect(b.deliveries.get('B-sess')).toEqual(['hi B'])
+    } finally {
+      await b.dispose()
+      await bServ.close()
+      await aServ.close()
+      await a.dispose()
+    }
+  })
+
+  it('reports no-sender-known for a reply addressed to a session that recorded none', async () => {
+    const receiver = await mounted('secret', new Set(['idle-sess']))
+    const result = await receiver.ctx.interconnect.reply({ sessionId: 'idle-sess', text: 'who?' })
+    expect(result.delivered).toBe(false)
+    expect(result.reason).toBe('no-sender-known')
+    await receiver.dispose()
+  })
+})
+
+describe('inbound msg/query frames on a served link', () => {
+  it('delivers an inbound msg (send) frame and answers a msg-result on the same socket', async () => {
+    const { upgrades, deliveries, dispose } = await mounted('secret', new Set([SESSION_ID]))
+    const { port, close } = await serveUpgrade(upgrades)
+    const { client, frames, waitOpen } = await dial(port)
+    try {
+      await waitOpen
+      await wait(50) // hello
+      client.send(JSON.stringify({
+        type: 'msg',
+        reqId: 'req-1',
+        message: { kind: 'send', sessionId: SESSION_ID, text: 'ws hello' },
+      }))
+      await wait(80)
+      expect(deliveries.get(SESSION_ID)).toEqual(['ws hello'])
+      expect(frames).toContainEqual({
+        type: 'msg-result',
+        reqId: 'req-1',
+        result: { delivered: true, instance: 'test-instance', delivery: 'followup' },
+      })
+    } finally {
+      client.terminate()
+      await close()
+      await dispose()
+    }
+  })
+
+  it('answers an inbound query ping frame with the instance identity', async () => {
+    const { upgrades, dispose } = await mounted('secret', new Set([SESSION_ID]))
+    const { port, close } = await serveUpgrade(upgrades)
+    const { client, frames, waitOpen } = await dial(port)
+    try {
+      await waitOpen
+      await wait(50)
+      client.send(JSON.stringify({ type: 'query', reqId: 'q-1', query: { kind: 'ping' } }))
+      await wait(80)
+      expect(frames).toContainEqual({
+        type: 'query-result',
+        reqId: 'q-1',
+        result: { pong: true, instance: 'test-instance' },
+      })
+    } finally {
+      client.terminate()
+      await close()
+      await dispose()
+    }
+  })
+
+  it('answers an inbound query list frame with live session rows', async () => {
+    const { upgrades, dispose } = await mounted('secret', new Set(['s1', 's2']))
+    const { port, close } = await serveUpgrade(upgrades)
+    const { client, frames, waitOpen } = await dial(port)
+    try {
+      await waitOpen
+      await wait(50)
+      client.send(JSON.stringify({ type: 'query', reqId: 'q-2', query: { kind: 'list' } }))
+      await wait(80)
+      const result = frames.find(f => f.type === 'query-result' && f.reqId === 'q-2') as { result: { sessions: unknown[] } } | undefined
+      expect(result?.result.sessions?.map((s) => (s as { sessionId: string }).sessionId).sort()).toEqual(['s1', 's2'])
+    } finally {
+      client.terminate()
+      await close()
+      await dispose()
+    }
+  })
+
+  it('announces hello to an authenticated dialer', async () => {
+    const { upgrades, dispose } = await mounted('secret', new Set([SESSION_ID]))
+    const { port, close } = await serveUpgrade(upgrades)
+    const { client, frames, waitOpen } = await dial(port)
+    try {
+      await waitOpen
+      await wait(80)
+      expect(frames).toContainEqual({ type: 'hello', sender: 'test-instance' })
+    } finally {
+      client.terminate()
+      await close()
+      await dispose()
+    }
+  })
+})
+
+describe('interconnect WebSocket link liveness', () => {
+  it('survives a local listener that throws on a peer-pushed event', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]))
+    const r = await serveUpgrade(receiver.upgrades)
+    const rUrl = `http://127.0.0.1:${String(r.port)}`
+    const sender = await mounted('secret', new Set([]), { 'peer-b': rUrl })
+    const uncaught: unknown[] = []
+    const onUncaught = (error: unknown): void => { uncaught.push(error) }
+    process.on('uncaughtException', onUncaught)
+    // Note: 'interconnect/event' fires locally on the RECEIVER for outbound
+    // events; here a raw listener throwing must not crash the process.
+    sender.ctx.on('interconnect/event', () => { throw new Error('listener exploded') })
+    try {
+      await wait(200)
+      expect(uncaught).toEqual([])
+    } finally {
+      process.off('uncaughtException', onUncaught)
+      await sender.dispose()
+      await r.close()
+      await receiver.dispose()
+    }
   })
 })

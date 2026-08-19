@@ -34,10 +34,11 @@ export function apply(ctx: Context): void {
       + 'Only a session with a running agent can receive a message; when none is running the result '
       + 'reports reason "session-not-live", and interconnect_list shows which sessions are live there.',
     parameters: {
-      baseUrl: {
+      instanceId: {
         type: 'string',
         required: true,
-        description: 'Receiver instance origin, e.g. http://127.0.0.1:3080 or http://peer-host:9001.',
+        description: 'The peer instance id to deliver to, as configured under this instance\'s '
+          + 'interconnect peers map. Deliveries go over the persistent link to that instance.',
       },
       sessionId: {
         type: 'string',
@@ -110,11 +111,16 @@ export function apply(ctx: Context): void {
         return [{ type: 'text', text }]
       },
     },
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = exec.agent?.session.id
+      const self = interconnect.selfSender(sessionId === undefined ? '' : String(sessionId))
       const result = await interconnect.send({
-        baseUrl: args.baseUrl,
+        instanceId: args.instanceId,
         sessionId: args.sessionId,
         text: args.text,
+        // Attribute this instance as the sender so the peer can reply back. The
+        // calling session id comes from the executing agent (the session sending).
+        sender: self,
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
         ...(args.resume === undefined ? {} : { resume: args.resume }),
       })
@@ -132,10 +138,11 @@ export function apply(ctx: Context): void {
     description: 'Probe a peer DSH instance for liveness and identity over the shared-secret channel. '
       + 'Returns the peer instance id when reachable, or null on transport/auth failure.',
     parameters: {
-      baseUrl: {
+      instanceId: {
         type: 'string',
         required: true,
-        description: 'Peer instance origin, e.g. http://127.0.0.1:3080.',
+        description: 'The peer instance id to probe, as configured under this instance\'s '
+          + 'interconnect peers map.',
       },
     },
     output: {
@@ -155,7 +162,7 @@ export function apply(ctx: Context): void {
       }],
     },
     async execute(args) {
-      const result = await interconnect.ping(args.baseUrl)
+      const result = await interconnect.ping(args.instanceId)
       if (result === undefined) return { reachable: false }
       return { reachable: true, instance: result.instance }
     },
@@ -168,10 +175,11 @@ export function apply(ctx: Context): void {
       + 'the time of the call. Only live sessions appear: a session that exists on the peer but has no '
       + 'running agent is not listed and cannot receive a message.',
     parameters: {
-      baseUrl: {
+      instanceId: {
         type: 'string',
         required: true,
-        description: 'Peer instance origin, e.g. http://127.0.0.1:3080.',
+        description: 'The peer instance id to list, as configured under this instance\'s '
+          + 'interconnect peers map.',
       },
     },
     output: {
@@ -210,7 +218,7 @@ export function apply(ctx: Context): void {
       },
     },
     async execute(args) {
-      const result = await interconnect.list(args.baseUrl)
+      const result = await interconnect.list(args.instanceId)
       if (result === undefined) return { reachable: false }
       return {
         reachable: true,
@@ -222,6 +230,93 @@ export function apply(ctx: Context): void {
           ...(session.title === undefined ? {} : { title: session.title }),
           ...(session.status === undefined ? {} : { status: session.status }),
         })),
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'interconnect_reply',
+    description: 'Deliver one text message back to the peer that this session last received an '
+      + 'interconnect message from. Only the LOCAL session id and the reply text are needed: the '
+      + 'outbound target (the peer origin and its session id) is recalled from the message this '
+      + 'session received, so you do not ask for an address twice. A session that never received a '
+      + 'message through interconnect — or received one without a sender identity — reports reason '
+      + '"no-sender-known".',
+    parameters: {
+      sessionId: {
+        type: 'string',
+        required: true,
+        description: 'The LOCAL session id that received the message being replied to.',
+      },
+      text: {
+        type: 'string',
+        required: true,
+        description: 'Message text delivered back to the recorded sender session.',
+      },
+      delivery: {
+        type: 'string',
+        enum: ['followup', 'steer', 'inject'],
+        description: 'How the reply reaches the target agent, as in interconnect_send. Omit to use '
+          + "the receiver's configured default.",
+      },
+      resume: {
+        type: 'boolean',
+        description: 'Wake the target session if it is persisted but has no running agent, as in '
+          + 'interconnect_send. Off by default; the receiver may refuse.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          delivered: { type: 'boolean', required: true },
+          instance: { type: 'string', required: true },
+          delivery: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        if (value.delivered) {
+          return [{
+            type: 'text',
+            text: `replied to ${value.instance}${value.delivery === undefined ? '' : ` via ${value.delivery}`}`,
+          }]
+        }
+        const text = ((): string => {
+          if (value.reason === 'no-sender-known') {
+            return `not delivered: no sender recorded for "${_args.sessionId}"`
+              + ' — this session never received an interconnect message with a sender identity'
+          }
+          if (value.reason === 'session-owned-by-subagent') {
+            return `not delivered: "${_args.sessionId}" is a subagent's session — its parent agent owns delivery`
+          }
+          if (value.reason === 'unreachable') {
+            return `not delivered: the recorded sender did not answer (unreachable or unauthorized)`
+          }
+          if (value.reason === 'resume-refused') {
+            return `not delivered: the recorded sender does not allow waking persisted sessions`
+          }
+          if (value.reason === 'resume-failed') {
+            return `not delivered: could not wake the recorded sender's session`
+          }
+          return `not delivered: the recorded sender's session is not live`
+        })()
+        return [{ type: 'text', text }]
+      },
+    },
+    async execute(args) {
+      const result = await interconnect.reply({
+        sessionId: args.sessionId,
+        text: args.text,
+        ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
+        ...(args.resume === undefined ? {} : { resume: args.resume }),
+      })
+      return {
+        delivered: result.delivered,
+        instance: result.instance,
+        ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
       }
     },
   }))

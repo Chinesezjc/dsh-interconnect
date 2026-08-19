@@ -34,6 +34,23 @@ export const INTERCONNECT_TOKEN_REF = 'DSH_INTERCONNECT_TOKEN'
 export type DeliveryMode = 'followup' | 'steer' | 'inject'
 
 /**
+ * Self-reported identity of the peer that sent a message, carried for reply
+ * attribution and echoed `sessionId` of the sending instance. Address-free on
+ * purpose: every delivery goes over an already-established WebSocket link, so
+ * the receiver addresses a `reply` by recalling the sender's `instanceId` and
+ * using its OWN outbound link to that instance — no origin crosses the wire.
+ * Both fields are sender-supplied and self-reported; the receiver stores them
+ * only to address a `reply`, never as an auth or routing authority (the shared
+ * secret still authenticates the connection itself).
+ */
+export interface SenderIdentity {
+  /** The sender's self-reported instance id (diagnostic, as in `ping`). */
+  readonly instanceId: string
+  /** Session id on the sender's instance to which a `reply` is addressed. */
+  readonly sessionId: string
+}
+
+/**
  * Business payload for the `send` endpoint: deliver one text message to one
  * live session of the receiving instance.
  */
@@ -42,6 +59,12 @@ export interface SendPayload {
   readonly sessionId: string
   /** Message text delivered to the peer session's inbox. */
   readonly text: string
+  /**
+   * The sender's identity, so the receiver can attribute the message and
+   * address a reply back. Optional for backward compatibility: a peer running
+   * an older version omits it, and the receiver simply has nothing to reply to.
+   */
+  readonly sender?: SenderIdentity
   /**
    * Per-message override of the receiver's configured delivery mode. Urgency is
    * a property of one message, not of the link, so a sender may ask to cut into
@@ -77,8 +100,12 @@ export interface SendPayload {
  * - `session-owned-by-subagent` — the session is reserved to subagent routing,
  *   so its parent agent owns delivery. Injecting here would race that parent;
  *   the sender must reach the child through its parent instead.
+ * - `no-sender-known` — a `reply` was addressed to a local session that never
+ *   recorded a sender, either because that session did not receive a message
+ *   through this service or the incoming message carried no `sender` identity
+ *   (an older peer omitted it).
  */
-export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent'
+export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent' | 'no-sender-known'
 
 /** Business result of a `send` endpoint call. */
 export interface SendResult {
@@ -133,21 +160,58 @@ export interface ListResult {
   readonly instance: string
 }
 
-/** Outbound listing request: just the receiver origin. */
+/** Outbound listing request: which peer instance to list. */
 export interface ListRequest {
-  /** Receiver origin, e.g. `http://127.0.0.1:3080`. */
-  readonly baseUrl: string
+  /** Peers' `instanceId` as configured under {@link Config.peers}. */
+  readonly instanceId: string
 }
 
-/** Outbound delivery request: receiver origin plus a `send` business payload. */
+/** Outbound delivery request: which peer instance plus a `send` business payload. */
 export interface SendRequest {
-  /** Receiver origin, e.g. `http://127.0.0.1:3080`. */
-  readonly baseUrl: string
+  /**
+   * The peer instance to deliver to, as configured under {@link Config.peers}.
+   * The origin used to reach it comes from that instance's own link.
+   */
+  readonly instanceId: string
   readonly sessionId: string
   readonly text: string
+  /**
+   * This sender's identity, forwarded so the receiver can attribute the
+   * message and address a reply back.
+   */
+  readonly sender?: SenderIdentity
   /** Per-message delivery override forwarded to the receiver. */
   readonly delivery?: DeliveryMode
   /** Ask the receiver to wake a persisted session; see {@link SendPayload.resume}. */
+  readonly resume?: boolean
+}
+
+/**
+ * Business payload for the `reply` endpoint: deliver one text message back to
+ * the peer that a given local session most recently received a message from.
+ * `sessionId` names the LOCAL session; the outbound target is the sender this
+ * session recorded, so the caller does not need to know the peer's origin or
+ * session id again.
+ */
+export interface ReplyPayload {
+  /** Local session id that received the message being replied to. */
+  readonly sessionId: string
+  /** Message text delivered back to the recorded sender's session. */
+  readonly text: string
+  /** Per-message delivery override forwarded to the recalled sender. */
+  readonly delivery?: DeliveryMode
+  /** Ask the recalled sender's receiver to wake a persisted session. */
+  readonly resume?: boolean
+}
+
+/** Outbound reply request: which local session is replying, plus the text. */
+export interface ReplyRequest {
+  /** Local session id that received the message being replied to. */
+  readonly sessionId: string
+  readonly text: string
+  /** Per-message delivery override forwarded to the recalled sender. */
+  readonly delivery?: DeliveryMode
+  /** Ask the recalled sender's receiver to wake a persisted session. */
   readonly resume?: boolean
 }
 
@@ -178,12 +242,55 @@ export interface EventPayload {
 /**
  * One text frame exchanged over a persistent WebSocket peer link. `hello`
  * opens a link with the dialing side's identity; `event` pushes one
- * notification in either direction. Native ws ping/pong carries the heartbeat,
- * so no application-level keepalive frame exists.
+ * notification in either direction; `msg`/`msg-result` carry a
+ * request/response message delivery over the same long-lived link (correlated
+ * by `reqId`). Native ws ping/pong carries the heartbeat, so no application
+ * keepalive frame exists.
  */
 export type LinkFrame =
   | { readonly type: 'hello'; readonly sender: string }
   | { readonly type: 'event'; readonly notification: EventNotification }
+  | { readonly type: 'msg'; readonly reqId: string; readonly message: LinkMessage }
+  | { readonly type: 'msg-result'; readonly reqId: string; readonly result: SendResult }
+  | { readonly type: 'query'; readonly reqId: string; readonly query: QueryMessage }
+  | { readonly type: 'query-result'; readonly reqId: string; readonly result: unknown }
+
+/**
+ * A request/response query carried by `query`/`query-result` frames, used for
+ * the discovery endpoints (`ping`, `list`) over the persistent link. `ping`
+ * answers the peer's identity; `list` answers the peer's live session rows.
+ */
+export type QueryMessage =
+  | { readonly kind: 'ping' }
+  | { readonly kind: 'list' }
+  | { readonly kind: 'event'; readonly notification: EventNotification }
+
+/**
+ * The message-shaped business payload carried by a `msg` link frame. `kind`
+ * picks the delivery semantics: `send` targets the named remote session,
+ * `reply` targets the sender a local session recorded. One tagged union keeps
+ * the frame count down while the receiver dispatches on `kind`.
+ */
+export type LinkMessage =
+  | {
+    readonly kind: 'send'
+    readonly sessionId: string
+    readonly text: string
+    /** Delivered and attributed upstream exactly as in `SendPayload`. */
+    readonly sender?: SenderIdentity
+    readonly delivery?: DeliveryMode
+    readonly resume?: boolean
+  }
+  | {
+    readonly kind: 'reply'
+    /** LOCAL session id that received the message being replied to. */
+    readonly sessionId: string
+    readonly text: string
+    /** Attribution for the replying instance, so the peer can reply back. */
+    readonly sender?: SenderIdentity
+    readonly delivery?: DeliveryMode
+    readonly resume?: boolean
+  }
 
 /**
  * Handle to one established outbound WebSocket peer link. `close` tears the
@@ -203,11 +310,19 @@ export interface Config {
   /** Request timeout for outbound deliveries, in milliseconds. */
   readonly requestTimeoutMs: number
   /**
-   * Peer instance origins to fan local events out to at startup. A runtime
-   * `subscribe` can extend the set without restart; an unset list fans nothing
-   * out until a peer subscribes.
+   * Peer instance routes, keyed by the peer's `instanceId`, valued by the
+   * origin this instance dials to reach that peer (e.g. a tunnel endpoint
+   * `http://127.0.0.1:13080`). At activation each peer is linked over a
+   * persistent WebSocket (heartbeat + reconnect), and every outbound
+   * `send`/`reply`/`ping`/`list` is addressed by `instanceId` through that
+   * instance's own link. An origin is the ONLY routing authority — `instanceId`
+   * is never used to derive an address.
+   *
+   * Fan-out of local lifecycle events also goes to every peer in this map.
+   * A runtime `subscribe(instanceId, origin)` can extend the map without
+   * restart; retuning the origin of an existing peer re-routes it.
    */
-  readonly peers?: string[]
+  readonly peers?: Record<string, string>
   /**
    * Default mode for inbound `send` messages that carry no per-message
    * override. See {@link DeliveryMode} for what each mode does.

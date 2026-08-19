@@ -18,6 +18,8 @@ function fakeInterconnect(overrides: Partial<InterconnectService> = {}): Interco
         { sessionId: 'sess-2' },
       ],
     })),
+    reply: vi.fn(async () => ({ delivered: true, instance: 'peer' })),
+    selfSender: vi.fn(() => ({ instanceId: 'self', sessionId: '' })),
     ...overrides,
   } as unknown as InterconnectService
 }
@@ -51,14 +53,14 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
     await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi' },
       { signal: new AbortController().signal } as never,
     )
     const mock = interconnect.send as unknown as { mock: { calls: [Record<string, unknown>][] } }
     expect('resume' in mock.mock.calls[0]![0]).toBe(false)
 
     await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi', resume: true },
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi', resume: true },
       { signal: new AbortController().signal } as never,
     )
     expect(mock.mock.calls[1]![0].resume).toBe(true)
@@ -68,7 +70,7 @@ describe('tool-interconnect', () => {
   it('renders resume-refused and resume-failed distinctly', async () => {
     const { ctx, dispose } = await mounted(fakeInterconnect())
     const tool = ctx.tools.get('interconnect_send')!
-    const args = { baseUrl: 'http://peer:9001', sessionId: 'sess-x', text: 'hi' }
+    const args = { instanceId: 'peer', sessionId: 'sess-x', text: 'hi' }
     const refused = tool.output!.render!(args, { delivered: false, instance: 'peer', reason: 'resume-refused' } as never)
     const failed = tool.output!.render!(args, { delivered: false, instance: 'peer', reason: 'resume-failed' } as never)
     expect((refused as { text: string }[])[0]!.text).toContain('does not allow waking')
@@ -89,14 +91,15 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi' },
       { signal: new AbortController().signal } as never,
     )
     // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
     expect(interconnect.send).toHaveBeenCalledWith({
-      baseUrl: 'http://peer:9001',
+      instanceId: 'peer',
       sessionId: 'sess-1',
       text: 'hi',
+      sender: { instanceId: 'self', sessionId: '' },
     })
     expect(value).toEqual({ delivered: true, instance: 'peer' })
     await dispose()
@@ -113,11 +116,11 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-gone', text: 'hi' },
+      { instanceId: 'peer', sessionId: 'sess-gone', text: 'hi' },
       { signal: new AbortController().signal } as never,
     )
     expect(value).toEqual({ delivered: false, instance: 'peer', reason: 'session-not-live' })
-    const rendered = tool.output!.render!({ baseUrl: 'http://peer:9001', sessionId: 'sess-gone', text: 'hi' }, value as never)
+    const rendered = tool.output!.render!({ instanceId: 'peer', sessionId: 'sess-gone', text: 'hi' }, value as never)
     const text = (rendered as { type: 'text'; text: string }[])[0]!.text
     expect(text).toContain('sess-gone')
     expect(text).toContain('interconnect_list')
@@ -135,10 +138,10 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi' },
       { signal: new AbortController().signal } as never,
     )
-    const rendered = tool.output!.render!({ baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' }, value as never)
+    const rendered = tool.output!.render!({ instanceId: 'peer', sessionId: 'sess-1', text: 'hi' }, value as never)
     const text = (rendered as { type: 'text'; text: string }[])[0]!.text
     expect(text).toContain('did not answer')
     // The old single-line render claimed "no live session" for this case too.
@@ -153,15 +156,16 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'urgent', delivery: 'steer' },
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'urgent', delivery: 'steer' },
       { signal: new AbortController().signal } as never,
     )
     // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
     expect(interconnect.send).toHaveBeenCalledWith({
-      baseUrl: 'http://peer:9001',
+      instanceId: 'peer',
       sessionId: 'sess-1',
       text: 'urgent',
       delivery: 'steer',
+      sender: { instanceId: 'self', sessionId: '' },
     })
     expect(value).toEqual({ delivered: true, instance: 'peer', delivery: 'steer' })
     await dispose()
@@ -172,7 +176,7 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
     await tool.execute(
-      { baseUrl: 'http://peer:9001', sessionId: 'sess-1', text: 'hi' },
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi' },
       { signal: new AbortController().signal } as never,
     )
     // An explicit `delivery: undefined` would serialize into the wire payload and
@@ -187,7 +191,7 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_ping')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001' },
+      { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     )
     expect(value).toEqual({ reachable: false })
@@ -198,7 +202,7 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(fakeInterconnect())
     const tool = ctx.tools.get('interconnect_ping')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001' },
+      { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     )
     expect(value).toEqual({ reachable: true, instance: 'peer' })
@@ -211,11 +215,11 @@ describe('tool-interconnect', () => {
     const tool = ctx.tools.get('interconnect_list')!
     expect(tool.name).toBe('interconnect_list')
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001' },
+      { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     )
     // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
-    expect(interconnect.list).toHaveBeenCalledWith('http://peer:9001')
+    expect(interconnect.list).toHaveBeenCalledWith('peer')
     expect(value).toEqual({
       reachable: true,
       instance: 'peer',
@@ -236,7 +240,7 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_list')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001' },
+      { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     ) as { sessions: Record<string, unknown>[] }
     expect('title' in value.sessions[0]!).toBe(false)
@@ -249,10 +253,121 @@ describe('tool-interconnect', () => {
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_list')!
     const value = await tool.execute(
-      { baseUrl: 'http://peer:9001' },
+      { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     )
     expect(value).toEqual({ reachable: false })
+    await dispose()
+  })
+
+  it('registers interconnect_reply and dispatches the local-session reply to the service', async () => {
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_reply')!
+    expect(tool.name).toBe('interconnect_reply')
+    const value = await tool.execute(
+      { sessionId: 'local-sess', text: 'hi back' },
+      { signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    expect(interconnect.reply).toHaveBeenCalledWith({ sessionId: 'local-sess', text: 'hi back' })
+    expect(value).toEqual({ delivered: true, instance: 'peer' })
+    await dispose()
+  })
+
+  it('forwards an explicit delivery mode on a reply and reports it back', async () => {
+    const interconnect = fakeInterconnect({
+      reply: vi.fn(async () => ({ delivered: true, instance: 'peer', delivery: 'inject' as const })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_reply')!
+    const value = await tool.execute(
+      { sessionId: 'local-sess', text: 'quiet reply', delivery: 'inject' },
+      { signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    expect(interconnect.reply).toHaveBeenCalledWith({
+      sessionId: 'local-sess',
+      text: 'quiet reply',
+      delivery: 'inject',
+    })
+    expect(value).toEqual({ delivered: true, instance: 'peer', delivery: 'inject' })
+    await dispose()
+  })
+
+  it('omits the delivery key on a reply when the caller passes no mode', async () => {
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_reply')!
+    await tool.execute(
+      { sessionId: 'local-sess', text: 'plain' },
+      { signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    const mock = interconnect.reply as unknown as { mock: { calls: [Record<string, unknown>][] } }
+    expect('delivery' in mock.mock.calls[0]![0]).toBe(false)
+    await dispose()
+  })
+
+  it('renders no-sender-known distinctly for a reply with no recorded sender', async () => {
+    const interconnect = fakeInterconnect({
+      reply: vi.fn(async () => ({
+        delivered: false,
+        instance: 'peer',
+        reason: 'no-sender-known' as const,
+      })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_reply')!
+    const args = { sessionId: 'local-sess', text: 'hello?' }
+    const value = await tool.execute(args, { signal: new AbortController().signal } as never)
+    const rendered = tool.output!.render!(args, value as never)
+    const text = (rendered as { text: string }[])[0]!.text
+    expect(text).toContain('no sender recorded')
+    expect(value).toEqual({ delivered: false, instance: 'peer', reason: 'no-sender-known' })
+    await dispose()
+  })
+
+  it('attaches the session identity as sender on interconnect_send', async () => {
+    const interconnect = fakeInterconnect({
+      selfSender: vi.fn((sessionId: string) => ({
+        instanceId: 'me',
+        sessionId,
+      })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    // The executing agent is the session that sends, so its id becomes the
+    // reply target the peer can use.
+    const agent = { session: { id: 'sender-sess' } }
+    await tool.execute(
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi' },
+      { agent, signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    expect(interconnect.selfSender).toHaveBeenCalledWith('sender-sess')
+    expect(interconnect.send).toHaveBeenCalledWith({
+      instanceId: 'peer',
+      sessionId: 'sess-1',
+      text: 'hi',
+      sender: { instanceId: 'me', sessionId: 'sender-sess' },
+    })
+    await dispose()
+  })
+
+  it('attributes the sender even when the executing agent id is absent', async () => {
+    // With address-free addressing the sender no longer depends on a config
+    // origin; it is always attached (with whatever session id is known).
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_send')!
+    await tool.execute(
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi' },
+      { signal: new AbortController().signal } as never,
+    )
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    const mock = interconnect.send as unknown as { mock: { calls: [Record<string, unknown>][] } }
+    expect(typeof (mock.mock.calls[0]![0] as { sender: { sessionId: string } }).sender.sessionId).toBe('string')
     await dispose()
   })
 })
