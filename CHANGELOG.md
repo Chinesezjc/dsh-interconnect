@@ -2,6 +2,26 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## Unreleased
+
+新增配套 skill 插件，落实 issue #3 的「告诉模型如何使用」与「工具调用自动注入发送者身份」两部分。
+
+### 新增
+
+- 新增 **`skill-interconnect`** 插件（`dsh-interconnect/skill-interconnect`），向 `ctx.skills`
+  注册 `dsh-interconnect` skill，告诉模型如何用 `interconnect_list` / `interconnect_ping` /
+  `interconnect_send` / `interconnect_reply`，以及 `delivery`、`resume`、失败原因的处理。
+- skill 明确写出：`interconnect_send` 会自动注入发送方的 `instanceId` 和 `sessionId`，
+  接收方凭记录的 sender 即可用 `interconnect_reply` 回信，不需要手工传地址。
+- 该插件 `inject: ['skills', 'interconnect']`，只有 interconnect 服务存在时才注册 skill。
+- 包新增 `./skill-interconnect` 与 `./skill-interconnect/invariant` 两个导出入口；
+  tarball 的 `files` 增加 `assets`，随包携带 skill 正文。
+
+### 验证
+
+- 新增 `tests/skill-interconnect.spec.ts` 覆盖：注册/卸载、正文加载、资源文件存在。
+- `pnpm run check`（typecheck + 全量 tests + build）保持全绿。
+
 ## 0.9.0（2026-08-19）
 
 破坏性大版本。本次重写解决了「接收方无法确认发送方、reply 链式回信（A→B→A→B）断链」的根因。

@@ -3,7 +3,7 @@
 跨实例消息互通与事件通知插件，用于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH)。
 让一个 DSH 实例能向同一个实例、另一台机器、或另一台机器上的别的 DSH 实例发送消息、探测活性，并在实例之间双向推送事件。
 
-## 包含两个插件
+## 包含三个插件
 
 **`interconnect`** —— host 服务（`ctx.interconnect`）：
 
@@ -19,6 +19,14 @@
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
 - `interconnect_reply`：向记录过的发送方回传消息，只需本机 session id + 文本，无需再次寻址
+
+**`skill-interconnect`** —— 配套 skill：
+
+- 向模型注册 `dsh-interconnect` skill，说明 `list`/`ping`/`send`/`reply` 的完整用法、
+  投递模式、`resume` 唤醒语义与失败处理。
+- 明确告知模型：`interconnect_send` 会自动注入发送方的 `instanceId` 和 `sessionId`，
+  接收方凭记录的 sender 即可用 `interconnect_reply` 回信，不需要手工传地址。
+- 依赖 `interconnect` 服务，只有传输层存在时才注册进 `ctx.skills`。
 
 ## 用法
 
@@ -210,7 +218,7 @@ Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedEr
 
 本包已发布到 npm：[`dsh-interconnect`](https://www.npmjs.com/package/dsh-interconnect)。
 本仓库是一个 DSH profile bundle（根 `package.json` 声明 `dsh.bundle.patch` 指向
-根 `cordis.patch.yml`，后者 `insert` 两个插件行）。
+根 `cordis.patch.yml`，后者 `insert` 三个插件行）。
 
 ```bash
 # 从 npm
@@ -241,21 +249,21 @@ pnpm run build    # esbuild → lib/
 
 ## 架构说明
 
-- 两个插件都挂在 **host composition**：`interconnect` 是跨 session、跨机器的进程级
-  服务（有 HTTP/WS 端点），必须 host 级；`tool-interconnect` 也放 host，因为
-  `interconnect` 未做 TypeRT `@Remote`/Gateway 绑定，放进 agent preset 的 isolate
-  realm 会导致工具行无法 inject 到该服务。
+- 三个插件都挂在 **host composition**：`interconnect` 是跨 session、跨机器的进程级
+  服务（有 HTTP/WS 端点），必须 host 级；`tool-interconnect` 和 `skill-interconnect`
+  也放 host，因为 `interconnect` 未做 TypeRT `@Remote`/Gateway 绑定，放进 agent preset
+  的 isolate realm 会导致工具/技能行无法 inject 到该服务。
 - `ws` 是运行依赖，由宿主的 node_modules 提供（构建时 external）。
 
 ## 验证
 
-- 34/34 单测通过（服务 + 工具）；类型检查、构建均干净。
+- 38/38 单测通过（服务 + 工具 + skill）；类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
 - CI（GitHub Actions）：clone 公开 DSH 仓库作为 sibling，跑 `pnpm run check`。
 - 已发布版本：从 registry 下载的 tarball 与本地构建 shasum 一致；干净消费端
-  解析 `.`、`./tool-interconnect` 两个入口的类型均通过，负例（把 `string` 赋给
-  `number`）如期报 `TS2322`。
+  解析 `.`、`./tool-interconnect`、`./skill-interconnect` 入口的类型均通过，负例（把
+  `string` 赋给 `number`）如期报 `TS2322`。
 - 投递消息以 `source: { kind: 'plugin', plugin: 'dsh-interconnect' }` 落库，而不是
   `{ kind: 'user' }`。负例：把该 source 改回 `kind: 'user'`，对应断言转红。
   **注意 `source` 不进模型上下文**——只有 `role` 和 `content` 会，而 `role` 是 `user`。

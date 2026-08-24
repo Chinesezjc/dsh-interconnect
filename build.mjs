@@ -1,5 +1,5 @@
 /**
- * ESM host build for dsh-interconnect: two host plugins (compiled from their
+ * ESM host build for dsh-interconnect: three host plugins (compiled from their
  * TypeScript sources) plus their invariant companions. `@deepseek-ai/dsh-*`
  * and cordis stay external (the profile's healed node_modules provides them);
  * schemastery is bundled because the Loader validates Config against it.
@@ -20,6 +20,8 @@ for (const [entry, outfile] of [
   ['src/interconnect/invariant.ts', 'lib/interconnect/invariant.js'],
   ['src/tool-interconnect/index.ts', 'lib/tool-interconnect/index.js'],
   ['src/tool-interconnect/invariant.ts', 'lib/tool-interconnect/invariant.js'],
+  ['src/skill-interconnect/index.ts', 'lib/skill-interconnect/index.js'],
+  ['src/skill-interconnect/invariant.ts', 'lib/skill-interconnect/invariant.js'],
 ]) {
   await build({
     entryPoints: [entry],

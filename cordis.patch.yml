@@ -1,4 +1,4 @@
-# dsh-interconnect bundle patch: mount the two host plugins under their
+# dsh-interconnect bundle patch: mount the three host plugins under their
 # subpath entries, resolved through the profile's node_modules (the healed
 # mirror makes every bundle dependency resolvable to bare rows).
 - insert:
@@ -10,3 +10,6 @@
 
     - id: tool-interconnect
       name: dsh-interconnect/tool-interconnect
+
+    - id: skill-interconnect
+      name: dsh-interconnect/skill-interconnect

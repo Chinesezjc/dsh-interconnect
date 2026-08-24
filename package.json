@@ -1,6 +1,6 @@
 {
   "name": "dsh-interconnect",
-  "description": "Cross-instance message/event handoff plugins for DeepSeek Harness (DSH): interconnect service + model-facing tools",
+  "description": "Cross-instance message/event handoff plugins for DeepSeek Harness (DSH): interconnect service + model-facing tools + companion skill",
   "version": "0.9.0",
   "license": "MIT",
   "type": "module",
@@ -18,6 +18,14 @@
       "types": "./lib/types/tool-interconnect/index.d.ts",
       "default": "./lib/tool-interconnect/index.js"
     },
+    "./skill-interconnect": {
+      "types": "./lib/types/skill-interconnect/index.d.ts",
+      "default": "./lib/skill-interconnect/index.js"
+    },
+    "./skill-interconnect/invariant": {
+      "types": "./lib/types/skill-interconnect/invariant.d.ts",
+      "default": "./lib/skill-interconnect/invariant.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -28,6 +36,7 @@
   },
   "files": [
     "lib",
+    "assets",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
@@ -50,6 +59,7 @@
     "@deepseek-ai/dsh-host-apiproxy": "*",
     "@deepseek-ai/dsh-host-webserver": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-skill": "*",
     "@deepseek-ai/dsh-invariants": "*",
     "@deepseek-ai/schemastery": "*",
     "ws": "*"
@@ -66,6 +76,7 @@
     "@deepseek-ai/dsh-host-apiproxy": "link:../dsh/packages/host/apiproxy",
     "@deepseek-ai/dsh-host-webserver": "link:../dsh/packages/host/webserver",
     "@deepseek-ai/dsh-tools": "link:../dsh/packages/core/tools",
+    "@deepseek-ai/dsh-skill": "link:../dsh/packages/skill/skill",
     "@deepseek-ai/dsh-invariants": "link:../dsh/packages/runtime-diagnostics/invariants",
     "@deepseek-ai/dsh-system-prompt": "link:../dsh/packages/core/system-prompt",
     "@types/node": "^24.0.0",

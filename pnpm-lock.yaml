@@ -35,6 +35,9 @@ importers:
       '@deepseek-ai/dsh-session':
         specifier: link:../dsh/packages/core/session
         version: link:../dsh/packages/core/session
+      '@deepseek-ai/dsh-skill':
+        specifier: link:../dsh/packages/skill/skill
+        version: link:../dsh/packages/skill/skill
       '@deepseek-ai/dsh-subagent':
         specifier: link:../dsh/packages/subagent/subagent
         version: link:../dsh/packages/subagent/subagent

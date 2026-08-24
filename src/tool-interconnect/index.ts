@@ -32,7 +32,9 @@ export function apply(ctx: Context): void {
       + 'another machine, or another session), over a shared-secret-authenticated channel. '
       + 'Returns whether the peer instance received it and which instance answered. '
       + 'Only a session with a running agent can receive a message; when none is running the result '
-      + 'reports reason "session-not-live", and interconnect_list shows which sessions are live there.',
+      + 'reports reason "session-not-live", and interconnect_list shows which sessions are live there. '
+      + 'The sending instance and session ids are attached automatically, so the receiver can reply '
+      + 'with interconnect_reply; do not pass a sender parameter.',
     parameters: {
       instanceId: {
         type: 'string',
