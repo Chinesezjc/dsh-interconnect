@@ -128,8 +128,11 @@ interconnect_reply(sessionId=B-sess, text="reply")
 
 `interconnect_send` 不会往 subagent 拥有的 session 里投递，`interconnect_list` 也不会把它们
 列出来。那类 session 的投递权属于它的父 agent，从这里 splice 进 inbox 会和父 agent 抢。判定
-直接复用 Host 的 `hasApiRemoteSubagentOwner`（`@deepseek-ai/dsh-api-remotes`），而不是自己
-实现一份——这是安全规则，本地副本一定会和上游漂移。
+逻辑镜像 Host 的 `hasApiSessionSubagentOwner`（`@deepseek-ai/dsh-api-session-controller`）：
+Host 在 0.6 之后把这个谓词从 `@deepseek-ai/dsh-api-remotes` 移走，且没有公开导出——桌面端和
+`npx @deepseek-ai/dsh web` 运行时里没有任何可 import 的 Host 绑定，所以这里逐字复制一份
+（`isSessionOwnedBySubagent`，见 `src/interconnect/index.ts`）。这是安全规则，Host 改动该规则
+时必须同步此副本；tests 覆盖 origin=subagent 与 parent-owned 两条封栏分支。
 
 已实测：起一个真实 subagent 后，`interconnect_list` 不包含它；直接 `send` 到它的 id 返回
 `session-owned-by-subagent`，消息**没有**进入 inbox。

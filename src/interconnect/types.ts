@@ -1,8 +1,9 @@
 /**
  * Wire contracts for `@deepseek-ai/dsh-interconnect`.
- * The transport reuses the Connection RPC envelope (`ClientRequest` /
- * `ServerResponse` from `@deepseek-ai/dsh-host-apiproxy/api`); this module
- * defines only the business payloads that ride inside that envelope.
+ * The transport is WebSocket-only: `LinkFrame`, `QueryMessage`, and `LinkMessage`
+ * define the whole wire shape exchanged over the `/interconnect/link` upgrade
+ * (see `index.ts`); this module defines those frames plus the business payloads
+ * that ride inside them. No Host RPC envelope is involved.
  * @module @deepseek-ai/dsh-interconnect
  */
 

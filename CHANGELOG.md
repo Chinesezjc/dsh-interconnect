@@ -2,6 +2,30 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.10.1（2026-09-01）
+
+修复发布版本在真实 DSH 运行时无法加载的问题（issue #5）。
+
+### 修复
+
+- **移除对 `hasApiRemoteSubagentOwner` 的 import**：该导出在 `@deepseek-ai/dsh-api-remotes`
+  任何已发布版本中都不存在（Host 已把该谓词移入 `dsh-api-session-controller` 且不公开导出），
+  导致 0.6.1～0.10.0 发布版加载时抛 `SyntaxError: does not provide an export named
+  'hasApiRemoteSubagentOwner'`。改为在插件内逐字镜像 Host 的 `hasApiSessionSubagentOwner`
+  （`isSessionOwnedBySubagent`），行为不变。
+- **清掉不再被 import 的 peer/dev 依赖**：`@deepseek-ai/dsh-api-remotes` 与
+  `@deepseek-ai/dsh-host-apiproxy` 已无任何源码引用（apiproxy 自 0.9.0 起移除），继续声明只会
+  让 pnpm 在无这两个包的运行时里报 unmet peer。
+
+### 验证
+
+- 新增 `tests/interconnect.host.spec.ts` 两条封栏用例：`list` 排除 origin=subagent 与
+  parent-owned 会话（含 parentSession 但无所有权的会话仍列出）；`send` 到被封栏会话返回
+  `session-owned-by-subagent` 且不入 inbox。摘除封栏后两条用例均转红（负例验证通过）。
+- `pnpm run check`（typecheck + 40/40 tests + build）全绿。
+- npm pack + 干净目录安装 tarball 后各入口可正常 import，无 `ERR_MODULE_NOT_FOUND` 与
+  missing-export 错误。
+
 ## 0.10.0（2026-08-24）
 
 新增配套 skill 插件，落实 issue #3 的「告诉模型如何使用」与「工具调用自动注入发送者身份」两部分。

@@ -44,7 +44,10 @@ function fakeAgents(
   liveIds: ReadonlySet<string>,
   sources?: Map<string, MessageSource[]>,
   methods?: Map<string, string[]>,
+  headers?: Map<string, { origin?: string; parentSession?: string }>,
+  ownedByParent?: (id: string, parentId: string) => boolean,
 ) {
+  const headerOf = (id: string): { origin?: string; parentSession?: string } => headers?.get(id) ?? {}
   return {
     get(id: string): Agent | undefined {
       if (!liveIds.has(id)) return undefined
@@ -68,7 +71,7 @@ function fakeAgents(
       }
       return {
         id,
-        session: { id, header: {} },
+        session: { id, header: headerOf(id) },
         followup: record('followup'),
         steer: record('steer'),
         inject: record('inject'),
@@ -77,17 +80,17 @@ function fakeAgents(
     list(): Agent[] {
       return [...liveIds].map(id => ({
         id,
-        session: { id, header: {} },
+        session: { id, header: headerOf(id) },
         status: 'idle',
       }) as unknown as Agent)
     },
-    isOwnedBy: () => false,
+    isOwnedBy: (id: string, owner: Agent) => ownedByParent?.(id, owner.id) ?? false,
   }
 }
 
 const SESSION_ID = 'session-1'
 
-async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: Record<string, string> = {}, delivery: DeliveryMode = 'followup', allowResume = true, instanceId = 'test-instance'): Promise<{
+async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: Record<string, string> = {}, delivery: DeliveryMode = 'followup', allowResume = true, instanceId = 'test-instance', headers?: Map<string, { origin?: string; parentSession?: string }>, ownedByParent?: (id: string, parentId: string) => boolean): Promise<{
   ctx: Context
   upgrades: WebUpgradeRoute[]
   deliveries: Map<string, string[]>
@@ -101,7 +104,7 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   const sources = new Map<string, MessageSource[]>()
   const methods = new Map<string, string[]>()
   ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
-  ctx.provide('agents', fakeAgents(deliveries, liveIds, sources, methods))
+  ctx.provide('agents', fakeAgents(deliveries, liveIds, sources, methods, headers, ownedByParent))
   ctx.provide('credentials', fakeCredentials(token) as CredentialProvider)
   const fiber = ctx.plugin(InterconnectService, {
     instanceId,
@@ -401,6 +404,78 @@ describe('interconnect WebSocket link liveness', () => {
       await sender.dispose()
       await r.close()
       await receiver.dispose()
+    }
+  })
+})
+
+describe('subagent-ownership fence (mirror of the Host predicate)', () => {
+  // `ownedByParent` answers only for the one real parent chain; everything else
+  // (including a parentSession pointing at a missing parent) is NOT owned.
+  const headers = new Map<string, { origin?: string; parentSession?: string }>([
+    ['plain', {}],
+    ['raw-subagent', { origin: 'subagent' }],
+    ['parent-owned', { parentSession: 'plain' }],
+    ['parentless', { parentSession: 'no-such-parent' }],
+  ])
+  const ownedByParent = (id: string, parentId: string): boolean =>
+    id === 'parent-owned' && parentId === 'plain'
+
+  it('excludes subagent-owned sessions from list and keeps plain and parentless ones', async () => {
+    const { upgrades, dispose } = await mounted(
+      'secret',
+      new Set(['plain', 'raw-subagent', 'parent-owned', 'parentless']),
+      {}, 'followup', true, 'test-instance', headers, ownedByParent,
+    )
+    const { port, close } = await serveUpgrade(upgrades)
+    const { client, frames, waitOpen } = await dial(port)
+    try {
+      await waitOpen
+      await wait(50)
+      client.send(JSON.stringify({ type: 'query', reqId: 'q-fence', query: { kind: 'list' } }))
+      await wait(80)
+      const result = frames.find(f => f.type === 'query-result' && f.reqId === 'q-fence') as { result: { sessions: unknown[] } } | undefined
+      const listed = result?.result.sessions?.map((s) => (s as { sessionId: string }).sessionId).sort()
+      // raw-subagent (origin) and parent-owned (ownership chain) are fenced;
+      // parentless carries a parentSession but no ownership, so it stays listable.
+      expect(listed).toEqual(['parentless', 'plain'])
+    } finally {
+      client.terminate()
+      await close()
+      await dispose()
+    }
+  })
+
+  it('refuses to deliver to a subagent-owned session and reports the reason', async () => {
+    const { upgrades, deliveries, dispose } = await mounted(
+      'secret',
+      new Set(['plain', 'raw-subagent', 'parent-owned']),
+      {}, 'followup', true, 'test-instance', headers, ownedByParent,
+    )
+    const { port, close } = await serveUpgrade(upgrades)
+    const { client, frames, waitOpen } = await dial(port)
+    try {
+      await waitOpen
+      await wait(50)
+      for (const [i, target] of ['raw-subagent', 'parent-owned'].entries()) {
+        client.send(JSON.stringify({
+          type: 'msg',
+          reqId: `req-fence-${i}`,
+          message: { kind: 'send', sessionId: target, text: 'no' },
+        }))
+      }
+      await wait(80)
+      for (const [i, target] of ['raw-subagent', 'parent-owned'].entries()) {
+        expect(deliveries.get(target)).toBeUndefined()
+        expect(frames).toContainEqual({
+          type: 'msg-result',
+          reqId: `req-fence-${i}`,
+          result: { delivered: false, instance: 'test-instance', reason: 'session-owned-by-subagent' },
+        })
+      }
+    } finally {
+      client.terminate()
+      await close()
+      await dispose()
     }
   })
 })

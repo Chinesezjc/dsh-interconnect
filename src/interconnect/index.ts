@@ -19,9 +19,22 @@ import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-// The Host's own subagent-ownership predicate, reused rather than reimplemented:
-// this is a safety rule, and a local copy of it would drift from the Host's.
-import { hasApiRemoteSubagentOwner } from '@deepseek-ai/dsh-api-remotes'
+// Mirror of the Host's subagent-ownership predicate. The Host moved it out of
+// `@deepseek-ai/dsh-api-remotes` into `@deepseek-ai/dsh-api-session-controller`
+// without a public export, so there is no importable Host binding to reuse. The
+// logic is copied verbatim from the Host (`hasApiSessionSubagentOwner`); keep it
+// in sync if the Host changes the rule, since this is a safety fence.
+function isSessionOwnedBySubagent(
+  ctx: Context,
+  session: Pick<Session, 'header'>,
+  agent: Agent | undefined,
+): boolean {
+  if (session.header.origin === 'subagent') return true
+  const parentId = session.header.parentSession
+  if (parentId === undefined || agent === undefined) return false
+  const parent = ctx.agents.get(parentId)
+  return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
+}
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import z from '@deepseek-ai/schemastery'
@@ -520,7 +533,7 @@ export class InterconnectService extends Service {
     // refuse to deliver to must not be advertised as a target, or the listing
     // contradicts `send`.
     const reachable = this.ctx.agents.list()
-      .filter(agent => !hasApiRemoteSubagentOwner(this.ctx, agent.session, agent))
+      .filter(agent => !isSessionOwnedBySubagent(this.ctx, agent.session, agent))
     const sessions = reachable.map((agent): SessionSummary => {
       let title: string | undefined
       try {
@@ -596,7 +609,7 @@ export class InterconnectService extends Service {
     // parent, and splicing into its inbox from here would race that parent. The
     // wake path needs no separate check because the Host's resolver applies the
     // same fence internally.
-    if (hasApiRemoteSubagentOwner(this.ctx, agent.session, agent)) {
+    if (isSessionOwnedBySubagent(this.ctx, agent.session, agent)) {
       return { delivered: false, instance: this.instanceId, reason: 'session-owned-by-subagent' }
     }
     // Remember who sent this message so the receiving session can reply later.
