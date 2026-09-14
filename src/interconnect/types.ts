@@ -89,7 +89,8 @@ export interface SendPayload {
  * - `no-sender-known` — a `reply` was addressed to a local session that never
  *   recorded a sender, either because that session did not receive a message
  *   through this service or the incoming message carried no `sender` identity
- *   (an older peer omitted it).
+ *   (an older peer omitted it). A caller with no executing session reports it
+ *   too: there is no local session whose sender could be recalled.
  */
 export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent' | 'no-sender-known'
 

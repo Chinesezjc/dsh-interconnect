@@ -14,7 +14,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // Activates the `Context.interconnect` merge declared by the interconnect service plugin.
-import type {} from '../interconnect/index.ts'
+import { MAX_LISTED_SESSIONS } from '../interconnect/index.ts'
 
 /** Cordis plugin name. */
 export const name = 'tool-interconnect'
@@ -175,14 +175,14 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'interconnect_ping',
-    description: 'Probe a peer DSH instance for liveness and identity over the shared-secret channel. '
-      + 'Reports reachable with the peer instance id, or unreachable when the link is down or unauthorized.',
+    description: 'Probe a peer DSH instance for liveness and identity. '
+      + 'Reports reachable with the peer instance id, or unreachable when the peer does not answer.',
     parameters: {
       instanceId: {
         type: 'string',
         required: true,
-        description: 'The peer instance id to probe, as configured under this instance\'s '
-          + 'interconnect peers map.',
+        description: 'The peer instance id to probe, as configured for this instance\'s '
+          + 'interconnect peers.',
       },
     },
     output: {
@@ -219,8 +219,8 @@ export function apply(ctx: Context): void {
       instanceId: {
         type: 'string',
         required: true,
-        description: 'The peer instance id to list, as configured under this instance\'s '
-          + 'interconnect peers map.',
+        description: 'The peer instance id to list, as configured for this instance\'s '
+          + 'interconnect peers.',
       },
     },
     output: {
@@ -255,6 +255,11 @@ export function apply(ctx: Context): void {
           const status = session.status === undefined ? '' : ` [${session.status}]`
           return `${session.sessionId}${title}${status}`
         })
+        // A full page is the only truncation the tool can see: the peer reports
+        // no flag, so a listing cut short by the size bound stays silent here.
+        if (sessions.length === MAX_LISTED_SESSIONS) {
+          lines.push(`(${String(MAX_LISTED_SESSIONS)} of possibly more live sessions; a missing target may still be live)`)
+        }
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },

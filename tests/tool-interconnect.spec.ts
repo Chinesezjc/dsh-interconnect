@@ -5,6 +5,7 @@ import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as toolInterconnect from '../src/tool-interconnect/index.ts'
+import { MAX_LISTED_SESSIONS } from '../src/interconnect/index.ts'
 import type { InterconnectService, SendResult } from '../src/interconnect/index.ts'
 
 /** Minimal fake interconnect service recording calls and returning fixed results. */
@@ -428,6 +429,22 @@ describe('tool-interconnect rendering', () => {
     expect((unknown as { text: string }[])[0]!.text).toBe('reachable: (unknown instance)')
     const unreachable = tool.output.render(args, { reachable: false })
     expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable or unauthorized')
+    await dispose()
+  })
+
+  it('marks a full listing as possibly truncated', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const tool = ctx.tools.get('interconnect_list')!
+    const args = { instanceId: 'peer' }
+    const rows = Array.from(
+      { length: MAX_LISTED_SESSIONS },
+      (_unused, index) => ({ sessionId: `s-${String(index)}` }),
+    )
+    const full = tool.output.render(args, { reachable: true, instance: 'peer', sessions: rows })
+    const fullText = (full as { text: string }[])[0]!.text
+    expect(fullText).toContain('possibly more live sessions')
+    const short = tool.output.render(args, { reachable: true, instance: 'peer', sessions: rows.slice(1) })
+    expect((short as { text: string }[])[0]!.text).not.toContain('possibly more live sessions')
     await dispose()
   })
 

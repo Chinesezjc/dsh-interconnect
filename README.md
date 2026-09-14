@@ -58,6 +58,8 @@ session-b07326da-…                          [running]
 答案有双重上限：行数（`MAX_LISTED_SESSIONS`，100 行）与字节预算（`MAX_LIST_ROWS_BYTES`，等于链路
 帧上限减去 4 KiB 的 `query-result` 信封）。整帧必须待在链路的帧上限内，ws 对超限帧会直接关闭
 链路，所以 live session 极多、或标题很长时，对端只回答能装下的前若干行，而不是把传输打断。
+对端不上报截断标志，所以 `interconnect_list` 只在收到的行数正好等于该上限时追加一行提示
+（`100 of possibly more live sessions`）——满页**可能**被截断，缺失的目标仍可能 live。
 ping 与 list 的答复还会按调用方问的 kind 校验形状，形状不符按「无答复」处理（对应 `unreachable`）。
 
 ### 回复（`reply`）
@@ -266,7 +268,7 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 163/163 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限等回归用例）；
+- 164/164 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示等回归用例）；
   类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。

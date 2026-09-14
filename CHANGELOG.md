@@ -2,6 +2,22 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.9（2026-09-15）
+
+跟随 #3243 分支 head（`04c675d471`），同步 `list` 满页截断提示与 ping 文案。
+
+### 变更
+
+- `MAX_LISTED_SESSIONS` 由模块内部常量改为导出，`interconnect_list` 的渲染按它判断是否满页。
+- `interconnect_list` 在行数达到上限时追加一行提示：满页可能已被截断，缺失的目标仍可能在线。
+- `interconnect_ping` 的描述改为上游措辞（不再声明 shared-secret 通道）；ping 与 list 的 `instanceId` 参数说明统一为「按本实例的 peers 配置」。
+- `SendFailure` 的 `no-sender-known` 文档补充：没有执行会话的调用方同样报该原因。
+
+### 验证
+
+- `pnpm run check`（typecheck + 164/164 tests + build）全绿。
+- 与上游 head 的增删行逐行比对，唯一差异是 import 路径适配（`@deepseek-ai/dsh-experimental-interconnect` → `../interconnect/index.ts`）。
+
 ## 0.11.8（2026-09-15）
 
 跟随 #3243 分支 head（`70ed636169`），同步 `tool-interconnect` 的模型可见文案。

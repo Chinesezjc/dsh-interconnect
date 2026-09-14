@@ -126,9 +126,11 @@ const LIST_FRAME_ENVELOPE_BYTES = 4096
 const MAX_LIST_ROWS_BYTES = MAX_LINK_FRAME_BYTES - LIST_FRAME_ENVELOPE_BYTES
 /**
  * Maximum session rows one `list` answer carries, so a very large live set
- * still answers with a bounded number of targets.
+ * still answers with a bounded number of targets. A consumer that renders the
+ * answer can compare a full page against this bound to tell a complete listing
+ * from a truncated one.
  */
-const MAX_LISTED_SESSIONS = 100
+export const MAX_LISTED_SESSIONS = 100
 
 /** Serialized size of one row inside a frame's `sessions` array: UTF-8 bytes plus its separating comma. */
 const rowBytes = (row: InterconnectSessionSummary): number =>
