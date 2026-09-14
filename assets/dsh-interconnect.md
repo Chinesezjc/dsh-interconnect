@@ -60,7 +60,7 @@ Omit `delivery` to use the receiver's configured default.
 ## Waking offline sessions
 
 `resume` defaults to off. Setting `resume: true` asks the receiver to wake a
-persisted but not-running session, which starts a real billed agent turn with
+persisted session with no live agent, which starts a real billed agent turn with
 that session's full toolset. Only use it when the specific session must be
 reached and the receiver allows it. Prefer `interconnect_list` and an
 already-live target when possible.
@@ -69,7 +69,7 @@ already-live target when possible.
 
 When a send/reply reports `delivered: false`, read `reason`:
 
-- `session-not-live` — the receiver answered, but that session has no running
+- `session-not-live` — the receiver answered, but that session has no live
   agent. Use `interconnect_list` to choose another target, or consider
   `resume`.
 - `unreachable` — no usable answer arrived; the target may still be fine, so a

@@ -58,7 +58,7 @@ export interface SendPayload {
    */
   readonly delivery?: DeliveryMode
   /**
-   * Ask the receiver to wake a persisted session that has no running agent.
+   * Ask the receiver to wake a persisted session that has no live agent.
    *
    * Opt-in, and deliberately not the default: delivery to a woken session runs
    * a real agent turn — a billed model call whose assembly carries that
@@ -74,7 +74,7 @@ export interface SendPayload {
 /**
  * Why a `send` did not deliver. `delivered: false` alone cannot be acted on,
  * because the causes need different responses:
- * - `session-not-live` — the receiver answered; that session has no running
+ * - `session-not-live` — the receiver answered; that session has no live
  *   agent. Retrying the same id is futile until it is opened, so the caller
  *   should list live sessions and pick another target.
  * - `unreachable` — no usable answer from the receiver (transport failure, or

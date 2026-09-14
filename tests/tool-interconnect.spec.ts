@@ -177,7 +177,7 @@ describe('tool-interconnect', () => {
     const text = (rendered as { type: 'text'; text: string }[])[0]!.text
     expect(text).toContain('did not answer')
     expect(text).toContain('retrying may succeed')
-    // The old single-line render claimed "no live session" for this case too.
+    // An unreachable peer is a delivery outcome, not a liveness claim about the target.
     expect(text).not.toContain('no live session')
     await dispose()
   })

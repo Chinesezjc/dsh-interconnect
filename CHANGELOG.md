@@ -2,6 +2,23 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.12（2026-09-15）
+
+跟随 #3243 分支新 head（`aeefb65bde`）：把 live 口径的措辞统一收尾（纯文档，无行为变化）。
+
+### 变更
+
+- `interconnect/types.ts`：`resume` 文档与 `session-not-live` 说明里的 `no running agent` → `no live agent`。
+- **skill 正文**（`assets/dsh-interconnect.md`，模型可见且随包发布）：`persisted but not-running session` → `persisted session with no live agent`；失败原因说明里的 `no running agent` → `no live agent`。
+- `tests/tool-interconnect.spec.ts`：一行注释改写（断言未变）。
+- 上游同批还改了 monorepo 的两个 README（含 zh 与 i18n 配对文件），不进本包。
+
+### 验证
+
+- `pnpm run check`（typecheck + 168/168 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against aeefb65bde across 7 ported files, 1 byte-exact asset, and 1 patch row set`（其中 asset 是逐字节比较，移植前必红）。
+- **产物核实**：新构建的 `lib/**/*.js` 与 0.11.11 的已发布产物 **7/7 哈希一致** —— 本版确实无行为变化，唯一随包变化的是 skill 正文（三台部署上模型读到的文本）。
+
 ## 0.11.11（2026-09-15）
 
 跟随 #3243 分支新 head（`c4ddb1dd7f`）：修 review 指出的文档/文案不一致，并给 `unreachable` 的渲染补回重试提示。
