@@ -18,7 +18,7 @@
 - `interconnect_send`：向对端实例的指定 session 投递消息；可选 `delivery` 选投递模式、`resume` 唤醒离线 session
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
-- `interconnect_reply`：向记录过的发送方回传消息，只需本机 session id + 文本，无需再次寻址
+- `interconnect_reply`：向记录过的发送方回传消息，只需文本；回信 session 是本 agent 自己的，无需再次寻址
 
 **`skill-interconnect`** —— 配套 skill：
 
@@ -37,7 +37,7 @@
 - `interconnect_send(instanceId="peer", sessionId=..., text=...)`
 - `interconnect_ping(instanceId="peer")`
 - `interconnect_list(instanceId="peer")`
-- `interconnect_reply(sessionId=...)`（只需本地 session，目标从记录的 sender 解析）
+- `interconnect_reply(text=...)`（只需文本；回信 session 是本 agent 自己的，目标从记录的 sender 解析）
 
 `instanceId` 是 `interconnect` 行 `peers` 映射里的键；真正用来拨号的 origin 由该映射的值给出（例如隧道端点 `http://127.0.0.1:13080`），**instanceId 本身从不出现在线上**，也不参与路由——origin 才是唯一的拨号依据。到**未配置 / 未联通**的对端 `send`/`ping`/`list` 返回 `unreachable`（无 HTTP 回退）。
 
@@ -58,19 +58,17 @@ session-b07326da-…                          [running]
 ### 回复（`reply`）
 
 `send` 的线负载带一个 `sender` 身份（**无地址**：`instanceId` + `sessionId`），收到消息的
-instance 会按「本地 session id → 该 sender」记下这份身份。之后那个 session 可以只凭**自己的
-session id + 文本**把消息回传给发送方，不用再次给出对端 instanceId 或远程 session id——回信
-走的是本机到那个 instance 的持久链接。
+instance 会按「本地 session id → 该 sender」记下这份身份。之后那个 session 回信**只需要文本**：
+回信 session 就是执行 `interconnect_reply` 的 agent 自己的 session，工具据此查出记录的 sender，
+不用再次给出本地 session id、对端 instanceId 或远程 session id——回信走的是本机到那个
+instance 的持久链接。
 
 ```text
 # 源实例 A 指定目标 B 的 session，并带上自己的身份（无 baseUrl）
 interconnect_send(instanceId="b", sessionId=B-sess, text="…", sender={instanceId:A, sessionId:A-sess})
 
-# B 回传：只给本地 session id + 文本，目标从记录的 sender 解析
-interconnect_reply(sessionId=B-sess, text="reply")
-```
-# B 回传：只给本地 session id + 文本，目标从记录的 sender 解析
-interconnect_reply(sessionId=B-sess, text="reply")
+# B 回传：只给文本，回信 session 即执行该工具的 agent 自己的 session
+interconnect_reply(text="reply")
 ```
 
 - `sender` 是**自报**的，只用于 reply 归因与寻址，**不是**路由或鉴权依据——连接本身仍由
@@ -100,8 +98,7 @@ interconnect_reply(sessionId=B-sess, text="reply")
 - **出站**：`interconnect_send`/`interconnect_reply`/`ping`/`list` 都发对应帧并等待匹配 `reqId`
   的结果（受 `requestTimeoutMs` 约束）。到**未配置或未联通**的对端直接返回 `unreachable`——
   **没有 HTTP 回退**，这是 0.9 的破坏性变化。
-- **入站**：`msg` 帧走 `deliver`/`reply` 逻辑（sender 记录、subagent 封栏、`no-sender-known`
-  等），结果经同一 socket 回 `msg-result`；`query` 帧回 `query-result`。
+- **入站**：`msg` 帧携带 `send`，走 `deliver` 逻辑（sender 记录、subagent 封栏等），结果经同一 socket 回 `msg-result`；`query` 帧回 `query-result`。
 - 心跳与指数退避重连沿用既有实现。
 
 ### 投递失败的原因
@@ -256,11 +253,16 @@ pnpm run build    # esbuild → lib/
   服务（有 HTTP/WS 端点），必须 host 级；`tool-interconnect` 和 `skill-interconnect`
   也放 host，因为 `interconnect` 未做 TypeRT `@Remote`/Gateway 绑定，放进 agent preset
   的 isolate realm 会导致工具/技能行无法 inject 到该服务。
+- 服务只 inject `agents` 与 `credentials`；**宿主 webserver 是可选的**。有 webserver 时入站
+  升级路由注册在它上面（`webServer` 经等待式 inject fiber 接入，与组合顺序无关）；没有
+  webserver 的 profile（例如 headless）里服务仍会拨号已配置对端并经这些出站链接投递，即
+  仅出站模式。`dsh.plugin.json` 的 `inject` 与之一致，只有 `agents`、`credentials`。
 - `ws` 是运行依赖，由宿主的 node_modules 提供（构建时 external）。
 
 ## 验证
 
-- 38/38 单测通过（服务 + 工具 + skill）；类型检查、构建均干净。
+- 145/145 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧绑定等回归用例）；
+  类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
 - CI（GitHub Actions）：clone 公开 DSH 仓库作为 sibling，跑 `pnpm run check`。

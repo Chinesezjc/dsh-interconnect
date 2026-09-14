@@ -1,7 +1,9 @@
 /**
  * Model-facing tools for cross-instance message handoff: `interconnect_send`
- * delivers one text message to a live session on a peer DSH instance, and
- * `interconnect_ping` probes a peer's liveness and identity.
+ * delivers one text message to a live session on a peer DSH instance,
+ * `interconnect_ping` probes a peer's liveness and identity, `interconnect_list`
+ * discovers a peer's live sessions, and `interconnect_reply` answers the sender
+ * a local session last heard from.
  *
  * The tools consume the host-plane `interconnect` service and publish nothing
  * themselves, so this row sits as an ordinary tool plugin in a preset while
@@ -15,11 +17,57 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // Activates the `Context.interconnect` merge declared by the interconnect service plugin.
 import type {} from '../interconnect/index.ts'
 
+/** Cordis plugin name. */
+export const name = 'tool-interconnect'
+
 /** Services required before the tools can register. */
 export const inject = ['interconnect', 'tools']
 
+/** Shared `delivered`/`instance`/`delivery`/`reason` outcome shape of send and reply. */
+const deliveryOutcomeSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    delivered: { type: 'boolean', required: true },
+    instance: { type: 'string', required: true },
+    delivery: { type: 'string' },
+    reason: { type: 'string' },
+  },
+} as const
+
+/** Settle a service promise against the executing agent's cancellation signal. */
+const raceSignal = <T>(signal: AbortSignal, promise: Promise<T>): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      const reason: unknown = signal.reason
+      reject(reason instanceof Error ? reason : new Error(typeof reason === 'string' ? reason : 'aborted'))
+    }
+    if (signal.aborted) { abort(); return }
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(
+      (value) => { signal.removeEventListener('abort', abort); resolve(value) },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
+
+/** Project one send/reply service result into the tool's canonical outcome. */
+const deliveryOutcome = (result: {
+  delivered: boolean
+  instance: string
+  delivery?: string
+  reason?: string
+}): { delivered: boolean; instance: string; delivery?: string; reason?: string } => ({
+  delivered: result.delivered,
+  instance: result.instance,
+  ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
+  ...(result.reason === undefined ? {} : { reason: result.reason }),
+})
+
 /**
- * Register the two tool surfaces. Registration is idempotent per fiber; the
+ * Register the four tool surfaces. Registration is idempotent per fiber; the
  * tools unregister with the owning fiber.
  * @param ctx - connection context carrying the interconnect service and the tool registry.
  */
@@ -31,8 +79,9 @@ export function apply(ctx: Context): void {
     description: 'Deliver one text message to a live session on another DSH instance (same machine, '
       + 'another machine, or another session), over a shared-secret-authenticated channel. '
       + 'Returns whether the peer instance received it and which instance answered. '
-      + 'Only a session with a running agent can receive a message; when none is running the result '
-      + 'reports reason "session-not-live", and interconnect_list shows which sessions are live there. '
+      + 'Only a session with a running agent receives directly; a persisted one can be woken by '
+      + 'setting resume, and when delivery fails the result reports the reason (for example '
+      + '"session-not-live") and interconnect_list shows which sessions are live there. '
       + 'The sending instance and session ids are attached automatically, so the receiver can reply '
       + 'with interconnect_reply; do not pass a sender parameter.',
     parameters: {
@@ -71,16 +120,7 @@ export function apply(ctx: Context): void {
       },
     },
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          delivered: { type: 'boolean', required: true },
-          instance: { type: 'string', required: true },
-          delivery: { type: 'string' },
-          reason: { type: 'string' },
-        },
-      },
+      schema: deliveryOutcomeSchema,
       render: (_args, value) => {
         if (value.delivered) {
           return [{
@@ -90,8 +130,7 @@ export function apply(ctx: Context): void {
         }
         // Each failure gets the response it actually needs: a not-live target is
         // the caller's to re-choose, while an unreachable peer may just be worth
-        // retrying. The old single line claimed "no live session" even when the
-        // peer never answered, which pointed at the wrong thing entirely.
+        // The peer's lack of an answer is a delivery outcome, not a liveness claim.
         const text = ((): string => {
           switch (value.reason) {
             case 'unreachable':
@@ -105,9 +144,13 @@ export function apply(ctx: Context): void {
               return `not delivered: "${_args.sessionId}" is a subagent's session on ${value.instance}`
                 + ' — its parent agent owns delivery, so reach it through that parent'
             default:
+              // When the caller already asked to wake this session, the only
+              // honest next step is choosing a live target, not re-requesting
+              // resume.
               return `not delivered: no live session "${_args.sessionId}" on ${value.instance}`
-                + ' — use interconnect_list to see which sessions are live there,'
-                + ' or set resume to wake this one'
+                + (_args.resume === true
+                  ? ' — use interconnect_list to see which sessions are live there'
+                  : ' — use interconnect_list to see which sessions are live there, or set resume to wake this one')
           }
         })()
         return [{ type: 'text', text }]
@@ -116,7 +159,7 @@ export function apply(ctx: Context): void {
     async execute(args, exec) {
       const sessionId = exec.agent?.session.id
       const self = interconnect.selfSender(sessionId === undefined ? '' : String(sessionId))
-      const result = await interconnect.send({
+      const result = await raceSignal(exec.signal, interconnect.send({
         instanceId: args.instanceId,
         sessionId: args.sessionId,
         text: args.text,
@@ -125,20 +168,15 @@ export function apply(ctx: Context): void {
         sender: self,
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
         ...(args.resume === undefined ? {} : { resume: args.resume }),
-      })
-      return {
-        delivered: result.delivered,
-        instance: result.instance,
-        ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
-        ...(result.reason === undefined ? {} : { reason: result.reason }),
-      }
+      }))
+      return deliveryOutcome(result)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'interconnect_ping',
     description: 'Probe a peer DSH instance for liveness and identity over the shared-secret channel. '
-      + 'Returns the peer instance id when reachable, or null on transport/auth failure.',
+      + 'Reports reachable with the peer instance id, or unreachable when the link is down or unauthorized.',
     parameters: {
       instanceId: {
         type: 'string',
@@ -163,8 +201,8 @@ export function apply(ctx: Context): void {
           : 'unreachable or unauthorized',
       }],
     },
-    async execute(args) {
-      const result = await interconnect.ping(args.instanceId)
+    async execute(args, exec) {
+      const result = await raceSignal(exec.signal, interconnect.ping(args.instanceId))
       if (result === undefined) return { reachable: false }
       return { reachable: true, instance: result.instance }
     },
@@ -219,8 +257,8 @@ export function apply(ctx: Context): void {
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    async execute(args) {
-      const result = await interconnect.list(args.instanceId)
+    async execute(args, exec) {
+      const result = await raceSignal(exec.signal, interconnect.list(args.instanceId))
       if (result === undefined) return { reachable: false }
       return {
         reachable: true,
@@ -239,17 +277,12 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'interconnect_reply',
     description: 'Deliver one text message back to the peer that this session last received an '
-      + 'interconnect message from. Only the LOCAL session id and the reply text are needed: the '
-      + 'outbound target (the peer origin and its session id) is recalled from the message this '
-      + 'session received, so you do not ask for an address twice. A session that never received a '
-      + 'message through interconnect — or received one without a sender identity — reports reason '
-      + '"no-sender-known".',
+      + 'interconnect message from. Only the reply text is needed: the replying session is this '
+      + 'agent\'s own, and the outbound target (the peer origin and its session id) is recalled '
+      + 'from the message this session received, so you do not ask for an address twice. A session '
+      + 'that never received a message through interconnect — or received one without a sender '
+      + 'identity — reports reason "no-sender-known".',
     parameters: {
-      sessionId: {
-        type: 'string',
-        required: true,
-        description: 'The LOCAL session id that received the message being replied to.',
-      },
       text: {
         type: 'string',
         required: true,
@@ -268,16 +301,7 @@ export function apply(ctx: Context): void {
       },
     },
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          delivered: { type: 'boolean', required: true },
-          instance: { type: 'string', required: true },
-          delivery: { type: 'string' },
-          reason: { type: 'string' },
-        },
-      },
+      schema: deliveryOutcomeSchema,
       render: (_args, value) => {
         if (value.delivered) {
           return [{
@@ -287,39 +311,39 @@ export function apply(ctx: Context): void {
         }
         const text = ((): string => {
           if (value.reason === 'no-sender-known') {
-            return `not delivered: no sender recorded for "${_args.sessionId}"`
-              + ' — this session never received an interconnect message with a sender identity'
+            return 'not delivered: this session never received an interconnect message with a sender identity'
           }
           if (value.reason === 'session-owned-by-subagent') {
-            return `not delivered: "${_args.sessionId}" is a subagent's session — its parent agent owns delivery`
+            return 'not delivered: the recorded sender\'s session belongs to a subagent and its parent agent owns delivery'
           }
           if (value.reason === 'unreachable') {
-            return `not delivered: the recorded sender did not answer (unreachable or unauthorized)`
+            return 'not delivered: the recorded sender did not answer (unreachable or unauthorized)'
           }
           if (value.reason === 'resume-refused') {
-            return `not delivered: the recorded sender does not allow waking persisted sessions`
+            return 'not delivered: the recorded sender does not allow waking persisted sessions'
           }
           if (value.reason === 'resume-failed') {
-            return `not delivered: could not wake the recorded sender's session`
+            return 'not delivered: could not wake the recorded sender\'s session'
           }
-          return `not delivered: the recorded sender's session is not live`
+          return 'not delivered: the recorded sender\'s session is not live'
         })()
         return [{ type: 'text', text }]
       },
     },
-    async execute(args) {
-      const result = await interconnect.reply({
-        sessionId: args.sessionId,
+    async execute(args, exec) {
+      if (exec.agent === undefined) {
+        return { delivered: false, instance: 'unknown', reason: 'session-not-live' }
+      }
+      const result = await raceSignal(exec.signal, interconnect.reply({
+        // The replying session is this executing agent's own session, never a
+        // model-supplied id: the local sender map is keyed by session, so a
+        // forged id could reply as another session.
+        sessionId: String(exec.agent.session.id),
         text: args.text,
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
         ...(args.resume === undefined ? {} : { resume: args.resume }),
-      })
-      return {
-        delivered: result.delivered,
-        instance: result.instance,
-        ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
-        ...(result.reason === undefined ? {} : { reason: result.reason }),
-      }
+      }))
+      return deliveryOutcome(result)
     },
   }))
 }

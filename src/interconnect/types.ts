@@ -1,25 +1,10 @@
 /**
  * Wire contracts for `@deepseek-ai/dsh-interconnect`.
- * The transport is WebSocket-only: `LinkFrame`, `QueryMessage`, and `LinkMessage`
- * define the whole wire shape exchanged over the `/interconnect/link` upgrade
- * (see `index.ts`); this module defines those frames plus the business payloads
- * that ride inside them. No Host RPC envelope is involved.
+ * The transport is one WebSocket link per peer; this module defines only the
+ * business payloads that ride inside link frames.
  * @module @deepseek-ai/dsh-interconnect
  */
 
-/**
- * Logical HTTP route prefix this service owns. Requests reach endpoints as
- * `<baseURL>/interconnect/<endpoint>`.
- */
-export const INTERCONNECT_CHANNEL = '/interconnect'
-
-/**
- * Credential reference holding the shared auth token. Both halves of a link
- * must resolve the same value: inbound requests are rejected unless their
- * `Authorization: Bearer <token>` matches this secret, and outbound requests
- * send it. An unconfigured token fails closed on the inbound side.
- */
-export const INTERCONNECT_TOKEN_REF = 'DSH_INTERCONNECT_TOKEN'
 
 /**
  * How one inbound message reaches the target agent's inbox. Each value names an
@@ -140,7 +125,7 @@ export interface PingResult {
  * can reach exactly these, so the listing is the set of valid `sessionId`
  * values rather than a directory of everything ever persisted.
  */
-export interface SessionSummary {
+export interface InterconnectSessionSummary {
   /** The session id to pass back as `SendPayload.sessionId`. */
   readonly sessionId: string
   /**
@@ -156,7 +141,7 @@ export interface SessionSummary {
 /** Business result of a `list` endpoint call. */
 export interface ListResult {
   /** Live sessions in registration order. */
-  readonly sessions: readonly SessionSummary[]
+  readonly sessions: readonly InterconnectSessionSummary[]
   /** Echoed receiver instance id (diagnostic; never trusted for routing). */
   readonly instance: string
 }
@@ -187,23 +172,6 @@ export interface SendRequest {
   readonly resume?: boolean
 }
 
-/**
- * Business payload for the `reply` endpoint: deliver one text message back to
- * the peer that a given local session most recently received a message from.
- * `sessionId` names the LOCAL session; the outbound target is the sender this
- * session recorded, so the caller does not need to know the peer's origin or
- * session id again.
- */
-export interface ReplyPayload {
-  /** Local session id that received the message being replied to. */
-  readonly sessionId: string
-  /** Message text delivered back to the recorded sender's session. */
-  readonly text: string
-  /** Per-message delivery override forwarded to the recalled sender. */
-  readonly delivery?: DeliveryMode
-  /** Ask the recalled sender's receiver to wake a persisted session. */
-  readonly resume?: boolean
-}
 
 /** Outbound reply request: which local session is replying, plus the text. */
 export interface ReplyRequest {
@@ -268,30 +236,19 @@ export type QueryMessage =
 
 /**
  * The message-shaped business payload carried by a `msg` link frame. `kind`
- * picks the delivery semantics: `send` targets the named remote session,
- * `reply` targets the sender a local session recorded. One tagged union keeps
- * the frame count down while the receiver dispatches on `kind`.
+ * is always `send`: a reply originates locally (the tool calls `reply()`,
+ * which sends a regular `send` frame to the recalled sender), so the wire
+ * carries no `reply` variant to relay.
  */
-export type LinkMessage =
-  | {
-    readonly kind: 'send'
-    readonly sessionId: string
-    readonly text: string
-    /** Delivered and attributed upstream exactly as in `SendPayload`. */
-    readonly sender?: SenderIdentity
-    readonly delivery?: DeliveryMode
-    readonly resume?: boolean
-  }
-  | {
-    readonly kind: 'reply'
-    /** LOCAL session id that received the message being replied to. */
-    readonly sessionId: string
-    readonly text: string
-    /** Attribution for the replying instance, so the peer can reply back. */
-    readonly sender?: SenderIdentity
-    readonly delivery?: DeliveryMode
-    readonly resume?: boolean
-  }
+export type LinkMessage = {
+  readonly kind: 'send'
+  readonly sessionId: string
+  readonly text: string
+  /** Delivered and attributed upstream exactly as in `SendPayload`. */
+  readonly sender?: SenderIdentity
+  readonly delivery?: DeliveryMode
+  readonly resume?: boolean
+}
 
 /**
  * Handle to one established outbound WebSocket peer link. `close` tears the

@@ -1,29 +1,63 @@
 /**
- * Cross-instance message handoff service: inbound half owns one HTTP route on
- * the host webserver and delivers authenticated messages into live sessions;
- * outbound half POSTs the same wire shape to a peer instance.
+ * Cross-instance message handoff service: the inbound half owns one WebSocket
+ * upgrade route on the host webserver and delivers authenticated messages into
+ * live sessions; the outbound half dials the same route on peer instances.
  *
  * Transport is deliberately NOT the Connection RPC channel: that registry's
  * handler sees only `(endpoint, payload, signal)` and the trust fence is the
  * DNS-rebinding `trustedHosts` check, neither of which carries the shared-key
- * `Authorization` header this service authenticates on. Owning a plain HTTP
- * route keeps bearer-token auth at the boundary where the header is readable
- * and fails closed when the token is unconfigured.
+ * `Authorization` header this service authenticates on. Owning a plain
+ * upgrade route keeps bearer-token auth at the boundary where the header is
+ * readable and fails closed when the token is unconfigured.
  * @module @deepseek-ai/dsh-interconnect
  */
 
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, LoggerService } from '@deepseek-ai/cordis'
+import { createHash, randomUUID, timingSafeEqual as constantTimeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-// Mirror of the Host's subagent-ownership predicate. The Host moved it out of
-// `@deepseek-ai/dsh-api-remotes` into `@deepseek-ai/dsh-api-session-controller`
-// without a public export, so there is no importable Host binding to reuse. The
-// logic is copied verbatim from the Host (`hasApiSessionSubagentOwner`); keep it
-// in sync if the Host changes the rule, since this is a safety fence.
+import type { Session } from '@deepseek-ai/dsh-session'
+import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
+import z from '@deepseek-ai/schemastery'
+import WebSocket, { WebSocketServer } from 'ws'
+import type { RawData } from 'ws'
+import {
+  type Config,
+  type DeliveryMode,
+  type EventNotification,
+  type EventPayload,
+  type LinkFrame,
+  type LinkMessage,
+  type ListResult,
+  type PingResult,
+  type QueryMessage,
+  type ReplyRequest,
+  type SendPayload,
+  type SendResult,
+  type SendRequest,
+  type SendFailure,
+  type SenderIdentity,
+  type InterconnectSessionSummary,
+  type WebSocketLinkHandle,
+} from './types.ts'
+
+/**
+ * Mirror of the Host's subagent-ownership predicate. The Host keeps that rule
+ * in `@deepseek-ai/dsh-api-session-controller` (as `hasApiSessionSubagentOwner`)
+ * without publishing it as a binding host plugins may import, and adding that
+ * runtime package as a peer dependency would repeat the broken-published-
+ * artifact failure this repository exists to avoid. The body is copied verbatim
+ * from the Host; keep it in sync if the Host changes the rule, because this is
+ * a safety fence.
+ * @param ctx - host context carrying the live agent registry.
+ * @param session - attached or live session whose ownership is tested.
+ * @param agent - live agent when one exists for the session.
+ * @returns whether subagent routing owns the session identity.
+ */
 function isSessionOwnedBySubagent(
   ctx: Context,
   session: Pick<Session, 'header'>,
@@ -35,35 +69,26 @@ function isSessionOwnedBySubagent(
   const parent = ctx.agents.get(parentId)
   return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
 }
-import type { Session } from '@deepseek-ai/dsh-session'
-import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
-import z from '@deepseek-ai/schemastery'
-import WebSocket, { WebSocketServer } from 'ws'
-import type { RawData } from 'ws'
-import {
-  INTERCONNECT_TOKEN_REF,
-  type Config,
-  type DeliveryMode,
-  type EventNotification,
-  type EventPayload,
-  type LinkFrame,
-  type LinkMessage,
-  type ListResult,
-  type PingResult,
-  type QueryMessage,
-  type ReplyPayload,
-  type ReplyRequest,
-  type SendPayload,
-  type SendResult,
-  type SendRequest,
-  type SendFailure,
-  type SenderIdentity,
-  type SessionSummary,
-  type WebSocketLinkHandle,
-} from './types.ts'
+
+/** Exhaustiveness guard for closed unions. */
+function assertNever(value: never): never {
+  throw new Error(`interconnect: unhandled variant ${JSON.stringify(value)}`)
+}
 
 export type * from './types.ts'
-export { INTERCONNECT_TOKEN_REF } from './types.ts'
+/**
+ * Pathname prefix under which this service's WebSocket upgrade route lives.
+ * The persistent peer link is established at `<baseURL>/interconnect/link`.
+ */
+export const INTERCONNECT_CHANNEL = '/interconnect'
+
+/**
+ * Credential reference holding the shared auth token. Both halves of a link
+ * must resolve the same value: inbound requests are rejected unless their
+ * `Authorization: Bearer <token>` matches this secret, and outbound requests
+ * send it. An unconfigured token fails closed on the inbound side.
+ */
+export const INTERCONNECT_TOKEN_REF = 'DSH_INTERCONNECT_TOKEN'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -73,7 +98,10 @@ declare module '@deepseek-ai/cordis' {
     /**
      * A remote peer instance pushed one authenticated lifecycle notification
      * into this instance. Payload is the exact {@link EventNotification} that
-     * crossed the wire; listeners may react but must not block the HTTP ack.
+     * crossed the wire; listeners react synchronously on the frame handler.
+     * @mode emit
+     * @param notification - the serialized lifecycle fact that crossed the wire.
+     * @param peer - the sender's self-reported instance id.
      */
     'interconnect/event'(notification: EventNotification, peer: string): void
   }
@@ -82,74 +110,98 @@ declare module '@deepseek-ai/cordis' {
 const PLUGIN_SOURCE = 'dsh-interconnect'
 
 /** WebSocket upgrade pathname owning the persistent peer link. */
+/** Maximum inbound link-frame size in bytes; larger frames are dropped as protocol violations. */
+const MAX_LINK_FRAME_BYTES = 1024 * 1024
+/** Handshake window for an outbound dial; a CONNECTING socket past this is terminated and re-dialed. */
+const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
+/** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
 
 /** Wire union for the discriminated EventNotification fact (shared by HTTP and WS). */
 const notificationSchema = z.union([
-  z.object({ kind: z.const('agent/created'), sessionId: z.string() }),
-  z.object({ kind: z.const('agent/disposed'), sessionId: z.string() }),
-  z.object({ kind: z.const('agent/status'), sessionId: z.string(), status: z.union([z.const('idle'), z.const('running')]) }),
-  z.object({ kind: z.const('session/created'), sessionId: z.string(), parentSessionId: z.string() }),
-  z.object({ kind: z.const('session/disposed'), sessionId: z.string() }),
-  z.object({ kind: z.const('subagent/end'), provider: z.string(), childSessionId: z.string(), stopReason: z.string() }),
+  z.object({ kind: z.const('agent/created').required(), sessionId: z.string().required() }),
+  z.object({ kind: z.const('agent/disposed').required(), sessionId: z.string().required() }),
+  z.object({ kind: z.const('agent/status').required(), sessionId: z.string().required(), status: z.union([z.const('idle'), z.const('running')]).required() }),
+  z.object({ kind: z.const('session/created').required(), sessionId: z.string().required(), parentSessionId: z.string() }),
+  z.object({ kind: z.const('session/disposed').required(), sessionId: z.string().required() }),
+  z.object({ kind: z.const('subagent/end').required(), provider: z.string().required(), childSessionId: z.string().required(), stopReason: z.string().required() }),
 ])
 
-/** Wire shape of an address-free {@link SenderIdentity}. */
+/**
+ * Wire shape of an address-free {@link SenderIdentity}. Fields stay optional
+ * so an absent `sender` key (schemastery resolves it to an empty object)
+ * still passes; `deliver()` treats a partial identity as no sender.
+ */
 const senderSchema = z.object({ instanceId: z.string(), sessionId: z.string() })
 
-/** Wire union for the send/reply message carried by a `msg` link frame. */
-const messageSchema = z.union([
+/** Wire shape of one `query-result`: the ping answer, the live-session list, or the event-query ack. */
+const queryResultSchema = z.union([
+  z.object({ pong: z.const(true).required(), instance: z.string().required() }),
   z.object({
-    kind: z.const('send'),
-    sessionId: z.string(),
-    text: z.string(),
-    sender: senderSchema,
-    delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]),
-    resume: z.boolean(),
+    instance: z.string().required(),
+    sessions: z.array(z.object({
+      sessionId: z.string().required(),
+      title: z.string().required(false),
+      status: z.string().required(false),
+    })).required(),
   }),
-  z.object({
-    kind: z.const('reply'),
-    sessionId: z.string(),
-    text: z.string(),
-    sender: senderSchema,
-    delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]),
-    resume: z.boolean(),
-  }),
+  z.object({ accepted: z.const(true).required() }),
 ])
+
+/** Wire shape of a `send` message carried by a `msg` link frame. */
+const messageSchema = z.object({
+  kind: z.const('send').required(),
+  sessionId: z.string().required(),
+  text: z.string().required(),
+  sender: senderSchema,
+  delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]),
+  resume: z.boolean(),
+})
 
 /** Wire union for the discovery query carried by a `query` link frame. */
 const querySchema = z.union([
-  z.object({ kind: z.const('ping') }),
-  z.object({ kind: z.const('list') }),
-  z.object({ kind: z.const('event'), notification: notificationSchema }),
+  z.object({ kind: z.const('ping').required() }),
+  z.object({ kind: z.const('list').required() }),
+  z.object({ kind: z.const('event').required(), notification: notificationSchema.required() }),
+])
+
+/** Wire shape of one `send` answer: success carries the mode used, failure must carry the reason. */
+const msgResultSchema = z.union([
+  z.object({ delivered: z.const(true).required(), instance: z.string().required(), delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]) }),
+  z.object({ delivered: z.const(false).required(), instance: z.string().required(), reason: z.union([
+    z.const('session-not-live'),
+    z.const('unreachable'),
+    z.const('resume-refused'),
+    z.const('resume-failed'),
+    z.const('session-owned-by-subagent'),
+    z.const('no-sender-known'),
+  ]).required() }),
 ])
 
 /** Wire union for one WebSocket link text frame. */
 const linkFrameSchema = z.union([
-  z.object({ type: z.const('hello'), sender: z.string() }),
-  z.object({ type: z.const('event'), notification: notificationSchema }),
-  z.object({ type: z.const('msg'), reqId: z.string(), message: messageSchema }),
-  z.object({ type: z.const('msg-result'), reqId: z.string(), result: z.object({
-    delivered: z.boolean(),
-    instance: z.string(),
-    delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]),
-    reason: z.string(),
-  }) }),
-  z.object({ type: z.const('query'), reqId: z.string(), query: querySchema }),
-  z.object({ type: z.const('query-result'), reqId: z.string(), result: z.any() }),
+  z.object({ type: z.const('hello').required(), sender: z.string().required() }),
+  z.object({ type: z.const('event').required(), notification: notificationSchema.required() }),
+  z.object({ type: z.const('msg').required(), reqId: z.string().required(), message: messageSchema.required() }),
+  z.object({ type: z.const('msg-result').required(), reqId: z.string().required(), result: msgResultSchema.required() }),
+  z.object({ type: z.const('query').required(), reqId: z.string().required(), query: querySchema.required() }),
+  z.object({ type: z.const('query-result').required(), reqId: z.string().required(), result: queryResultSchema.required() }),
 ])
 
 /**
  * Live cross-instance handoff service, registered as `ctx.interconnect`.
- * Requires the host webserver, the live agent registry, and the credential
- * store; activation is availability-driven like every other host service.
+ * Requires the live agent registry and the credential store; the webserver is
+ * optional — with one, the service accepts inbound links on
+ * `/interconnect/link`; without one it still dials configured peers and
+ * delivers over those outbound links. Activation is availability-driven like
+ * every other host service.
  */
 export class InterconnectService extends Service {
-  static inject = ['webServer', 'agents', 'credentials']
+  static inject = ['agents', 'credentials']
   static Config: z<Config> = z.object({
     instanceId: z.string().default('dsh'),
     requestTimeoutMs: z.natural().max(60000).default(10000),
-    peers: z.object({}).default({}),
+    peers: z.dict(z.string()).default({}),
     delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]).default('followup'),
     allowResume: z.boolean().default(true),
   })
@@ -159,7 +211,7 @@ export class InterconnectService extends Service {
   private readonly delivery: DeliveryMode
   private readonly allowResume: boolean
   private readonly subscriptions: (() => void)[] = []
-  private readonly server = new WebSocketServer({ noServer: true })
+  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_LINK_FRAME_BYTES })
   private readonly sockets = new Set<WebSocket>()
   /** Outbound peer links keyed by the peer's `instanceId`. */
   private readonly linkStates = new Map<string, LinkState>()
@@ -169,17 +221,29 @@ export class InterconnectService extends Service {
   /** Sender each local session last received a send from, keyed by local session id. */
   private readonly senders = new Map<string, SenderIdentity>()
   /** In-flight frames sent over a peer link, keyed by `reqId`, awaiting a correlated result. */
-  private readonly pendingMessages = new Map<string, PendingMessage>()
+  private readonly pendingMessages = new Map<string, MutablePendingMessage>()
   private reqIdCounter = 0
+  /** Set when the service fiber unwinds; guards late inbound deliveries against driving disposed agents. */
+  private disposed = false
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'interconnect')
     this.instanceId = config.instanceId
     this.requestTimeoutMs = config.requestTimeoutMs
+    /* v8 ignore next 1 -- the Config schema applies its delivery default before the constructor runs. */
     this.delivery = config.delivery ?? 'followup'
+    /* v8 ignore next 1 -- the Config schema applies its allowResume default before the constructor runs. */
     this.allowResume = config.allowResume ?? true
+    // Validate every peer origin before dialing any of them: the same URL
+    // construction dial() uses, so a malformed origin fails the load before a
+    // socket or reconnect loop exists to leak (misconfiguration fails loud).
+    /* v8 ignore next 2 -- the Config schema applies its peers default before the constructor runs. */
+    for (const origin of Object.values(config.peers ?? {})) {
+      linkUrl(trimBase(origin))
+    }
     // Link every configured peer at activation: all delivery is over these
     // persistent links, and addressing is by instanceId through them.
+    /* v8 ignore next 1 -- the Config schema applies its peers default before the constructor runs. */
     for (const [peerInstanceId, origin] of Object.entries(config.peers ?? {})) {
       this.link(peerInstanceId, origin)
     }
@@ -188,7 +252,15 @@ export class InterconnectService extends Service {
       path: LINK_CHANNEL,
       handler: (req, socket, head) => { void this.handleUpgrade(req, socket, head) },
     }
-    ctx.effect(() => ctx.webServer.registerUpgrade(upgrade), 'interconnect: /interconnect/link websocket')
+    // The webserver is optional: without one the service still dials peers and
+    // delivers over those outbound links (outbound-only mode). Registering the
+    // inbound route through a waiting inject fiber instead of a constructor
+    // `ctx.get` means composition order cannot leave the route unregistered —
+    // the fiber activates whenever a webserver is available, and headless
+    // profiles simply never get one.
+    ctx.inject(['webServer'], (webCtx) => {
+      webCtx.effect(() => webCtx.webServer.registerUpgrade(upgrade), 'interconnect: /interconnect/link websocket')
+    })
 
     // Liveness sweep: terminate sockets that stopped answering protocol pings.
     // Deleting the CURRENT element of a `Set` while iterating is safe: Set
@@ -206,6 +278,12 @@ export class InterconnectService extends Service {
     // timer when the fiber unwinds.
     this.heartbeatTimer = setInterval(() => {
       for (const socket of this.sockets) {
+        // A socket that closed between sweeps must not reach ping(): ws
+        // throws synchronously when ping() is called on a non-OPEN socket.
+        if (socket.readyState !== WebSocket.OPEN) {
+          this.sockets.delete(socket)
+          continue
+        }
         if ((socket as WebSocket & { isAlive?: boolean }).isAlive === false) {
           socket.terminate()
           this.sockets.delete(socket)
@@ -216,6 +294,9 @@ export class InterconnectService extends Service {
       }
     }, 30000)
 
+    // Protocol constants, not deployment tunables: the heartbeat cadence is
+    // fixed by the link-layer liveness contract and the backoff schedule by the
+    // reconnect policy, so both stay hardcoded like the frame vocabulary.
     this.subscriptions.push(ctx.on('agent/status', ({ agent, status }) => {
       this.fanout({ kind: 'agent/status', sessionId: String(agent.session.id), status })
     }))
@@ -236,6 +317,7 @@ export class InterconnectService extends Service {
       })
     }))
     this.subscriptions.push(ctx.on('session/disposed', (session: Session) => {
+      this.senders.delete(String(session.id))
       this.fanout({ kind: 'session/disposed', sessionId: String(session.id) })
     }))
     this.subscriptions.push(ctx.on('subagent/end', (info: SubagentRunEndInfo) => {
@@ -258,12 +340,22 @@ export class InterconnectService extends Service {
     // Terminate every live socket, outbound dial loop, and the no-server
     // acceptor when the service fiber unwinds.
     ctx.effect(() => () => {
+      /* v8 ignore next 1 -- the constructor sets the interval before registering this teardown effect, so dispose always observes it. */
       if (this.heartbeatTimer !== undefined) clearInterval(this.heartbeatTimer)
       for (const state of this.linkStates.values()) state.close()
       this.linkStates.clear()
       for (const socket of this.sockets) socket.terminate()
       this.sockets.clear()
       this.server.close()
+      // Settle every in-flight request as unreachable: without this their
+      // timers keep the process alive until they fire, and a late `*-result`
+      // could resolve a pending that outlived its caller.
+      for (const pending of this.pendingMessages.values()) {
+        clearTimeout(pending.timer)
+        pending.resolve?.(undefined)
+      }
+      this.pendingMessages.clear()
+      this.disposed = true
     }, 'interconnect: websocket teardown')
   }
 
@@ -271,11 +363,17 @@ export class InterconnectService extends Service {
    * This instance's identity to attach to outbound messages. Always present:
    * it needs no address, only this instance's id and the calling session.
    * @param sessionId - the local session that is sending, used as the reply target.
+   * @returns this instance's address-free identity for the calling session.
    */
   selfSender(sessionId: string): SenderIdentity {
     return { instanceId: this.instanceId, sessionId }
   }
 
+  /**
+   * Deliver one text message to a live session on a peer instance.
+   * @param request - the peer instance id, target session, text, and optional delivery/resume overrides.
+   * @returns the peer's answer, or an unreachable result when no link answers.
+   */
   async send(request: SendRequest): Promise<SendResult> {
     const payload: SendPayload = {
       sessionId: request.sessionId,
@@ -284,8 +382,12 @@ export class InterconnectService extends Service {
       ...(request.delivery === undefined ? {} : { delivery: request.delivery }),
       ...(request.resume === undefined ? {} : { resume: request.resume }),
     }
-    const result = await this.msgRequest(request.instanceId, 'send', payload)
-    return result ?? { delivered: false, instance: this.instanceId, reason: 'unreachable' }
+    try {
+      const result = await this.msgRequest(request.instanceId, 'send', payload)
+      return result ?? { delivered: false, instance: request.instanceId, reason: 'unreachable' }
+    } catch {
+      return { delivered: false, instance: request.instanceId, reason: 'unreachable' }
+    }
   }
 
   /**
@@ -293,6 +395,8 @@ export class InterconnectService extends Service {
    * received a send from. `sessionId` names the LOCAL replying session; the
    * outbound target is the `sender` that session recorded, addressed through
    * this instance's own link to the sender's instance.
+   * @param request - the LOCAL replying session id, the reply text, and optional delivery/resume overrides.
+   * @returns the recalled sender's answer, or an unreachable result when no link answers.
    */
   async reply(request: ReplyRequest): Promise<SendResult> {
     const sender = this.senders.get(request.sessionId)
@@ -308,14 +412,20 @@ export class InterconnectService extends Service {
       // back — chaining the conversation.
       sender: this.selfSender(request.sessionId),
     }
-    const result = await this.msgRequest(sender.instanceId, 'send', payload)
-    return result ?? { delivered: false, instance: this.instanceId, reason: 'unreachable' }
+    try {
+      const result = await this.msgRequest(sender.instanceId, 'send', payload)
+      return result ?? { delivered: false, instance: sender.instanceId, reason: 'unreachable' }
+    } catch {
+      return { delivered: false, instance: sender.instanceId, reason: 'unreachable' }
+    }
   }
 
   /**
    * Probe a peer instance for liveness and identity over its persistent link.
    * Returns the peer identity when reachable, or undefined when the link is
    * not up or no answer arrives.
+   * @param instanceId - the peer's `instanceId` as configured under {@link Config.peers}.
+   * @returns the peer's identity, or undefined when the link is not up or no answer arrives.
    */
   async ping(instanceId: string): Promise<PingResult | undefined> {
     return this.queryRequest(instanceId, { kind: 'ping' }) as Promise<PingResult | undefined>
@@ -324,15 +434,11 @@ export class InterconnectService extends Service {
   /**
    * List a peer instance's live sessions over its persistent link. Undefined on
    * transport failure, matching `ping`.
+   * @param instanceId - the peer's `instanceId` as configured under {@link Config.peers}.
+   * @returns the peer's live session rows, or undefined on transport failure.
    */
   async list(instanceId: string): Promise<ListResult | undefined> {
     return this.queryRequest(instanceId, { kind: 'list' }) as Promise<ListResult | undefined>
-  }
-
-  /** The origin this instance dials to reach a configured peer, or undefined. */
-  private originOf(instanceId: string): string | undefined {
-    const state = this.linkStates.get(instanceId)
-    return state?.peer
   }
 
   /**
@@ -348,7 +454,7 @@ export class InterconnectService extends Service {
   ): Promise<SendResult | undefined> {
     const state = this.linkStates.get(instanceId)
     if (state === undefined || !state.writable()) return undefined
-    const reqId = `m${++this.reqIdCounter}-${crypto.randomUUID()}`
+    const reqId = `m${++this.reqIdCounter}-${randomUUID()}`
     const message: LinkMessage = {
       kind,
       sessionId: payload.sessionId,
@@ -357,48 +463,73 @@ export class InterconnectService extends Service {
       ...(payload.delivery === undefined ? {} : { delivery: payload.delivery }),
       ...(payload.resume === undefined ? {} : { resume: payload.resume }),
     }
-    return this.waitForResult(reqId, (failure) => {
+    return this.waitForResult(reqId, 'msg', (failure) => {
       const wrote = state.sendFrame({ type: 'msg', reqId, message })
+      /* v8 ignore next 1 -- writable() and sendFrame read the same socket.readyState synchronously, so this guard is unreachable. */
       if (!wrote) failure(new Error(`interconnect: peer link to ${instanceId} closed while sending`))
     }) as Promise<SendResult | undefined>
   }
 
   /** Send a `query` frame over the live link to a peer and resolve its result. */
-  private async queryRequest(instanceId: string, query: QueryMessage): Promise<unknown> {
+  private async queryRequest(instanceId: string, query: { kind: 'ping' } | { kind: 'list' }): Promise<unknown> {
     const state = this.linkStates.get(instanceId)
     if (state === undefined || !state.writable()) return undefined
-    const reqId = `q${++this.reqIdCounter}-${crypto.randomUUID()}`
-    return this.waitForResult(reqId, (failure) => {
-      const wrote = state.sendFrame({ type: 'query', reqId, query })
-      if (!wrote) failure(new Error(`interconnect: peer link to ${instanceId} closed while querying`))
-    })
+    const reqId = `q${++this.reqIdCounter}-${randomUUID()}`
+    // Validate the answer against the KIND of query this request asked, not
+    // just the frame union: a peer answering a `list` with a ping-shaped
+    // result would otherwise crash the tool on `result.sessions.map`. An
+    // answer that fails its kind's shape is treated as no answer at all.
+    const accept = query.kind === 'ping'
+      ? (result: unknown): result is PingResult =>
+        typeof result === 'object' && result !== null
+          && (result as { pong?: unknown }).pong === true
+          && typeof (result as { instance?: unknown }).instance === 'string'
+      : (result: unknown): result is ListResult =>
+        typeof result === 'object' && result !== null
+          && Array.isArray((result as { sessions?: unknown }).sessions)
+          && typeof (result as { instance?: unknown }).instance === 'string'
+    try {
+      return await this.waitForResult(reqId, 'query', (failure) => {
+        const wrote = state.sendFrame({ type: 'query', reqId, query })
+        /* v8 ignore next 1 -- writable() and sendFrame read the same socket.readyState synchronously. */
+        if (!wrote) failure(new Error(`interconnect: peer link to ${instanceId} closed while querying`))
+      }, accept)
+    } catch {
+      // A peer that never answers must read as transport failure, matching the
+      // public JSDoc: `ping`/`list` return undefined when no answer arrives.
+      return undefined
+    }
   }
 
   /** Settle a `reqId` frame against its `*-result`, timing out at `requestTimeoutMs`. */
-  private waitForResult(reqId: string, send: (failure: (error: unknown) => void) => void): Promise<unknown> {
+  private waitForResult(
+    reqId: string,
+    kind: 'msg' | 'query',
+    send: (failure: (error: unknown) => void) => void,
+    accept?: (result: unknown) => boolean,
+  ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingMessages.delete(reqId)
         reject(new Error(`interconnect: no result for ${reqId} within ${this.requestTimeoutMs}ms`))
       }, this.requestTimeoutMs)
-      this.pendingMessages.set(reqId, { timer })
-      const pending = this.pendingMessages.get(reqId)
-      if (pending === undefined) return
-      ;(pending as MutablePendingMessage).resolve = (result: unknown) => {
-        clearTimeout(timer)
-        this.pendingMessages.delete(reqId)
-        resolve(result)
-      }
-      ;(pending as MutablePendingMessage).reject = (error: unknown) => {
-        clearTimeout(timer)
-        this.pendingMessages.delete(reqId)
-        reject(error instanceof Error ? error : new Error(String(error)))
-      }
+      this.pendingMessages.set(reqId, {
+        timer,
+        kind,
+        ...(accept === undefined ? {} : { accept }),
+        resolve: (result: unknown) => {
+          clearTimeout(timer)
+          this.pendingMessages.delete(reqId)
+          resolve(result)
+        },
+      })
+      /* v8 ignore start -- the failure callback is gated by the writable() check; the timeout rejects instead. */
       send((error: unknown) => {
         clearTimeout(timer)
         this.pendingMessages.delete(reqId)
         reject(error instanceof Error ? error : new Error(String(error)))
       })
+      /* v8 ignore stop */
     })
   }
 
@@ -410,13 +541,27 @@ export class InterconnectService extends Service {
    * @returns disposer removing the peer route.
    */
   subscribe(instanceId: string, origin: string): () => void {
-    this.link(instanceId, origin)
+    const linked = this.link(instanceId, origin)
+    const dialedOrigin = trimBase(origin)
     return () => {
-      this.forgetLink(instanceId)
+      // Close only the state this subscription established AND that still
+      // dials the origin it subscribed: link() reuses the same state object
+      // for a re-route, so an identity check alone would let an older
+      // disposer tear down a route another caller re-pointed. The peer guard
+      // covers re-routes to a different origin; an A→B→A round trip that
+      // lands back on the subscribed origin is treated as the same route.
+      const state = this.linkStates.get(instanceId)
+      if (state === linked && state.peer === dialedOrigin) {
+        state.close()
+        this.linkStates.delete(instanceId)
+      }
     }
   }
 
-  /** Remove a peer route, closing its outbound link. */
+  /**
+   * Remove a peer route, closing its outbound link.
+   * @param instanceId - the peer route to remove.
+   */
   unsubscribe(instanceId: string): void {
     const state = this.linkStates.get(instanceId)
     if (state !== undefined) state.close()
@@ -434,19 +579,23 @@ export class InterconnectService extends Service {
    */
   link(instanceId: string, origin: string): WebSocketLinkHandle {
     const existing = this.linkStates.get(instanceId)
-    if (existing !== undefined) {
+    if (existing !== undefined && !existing.isClosed()) {
       existing.reroute(trimBase(origin))
       return existing
     }
-    const state = new LinkState(this, instanceId, trimBase(origin))
+    // A closed state is replaced fresh: a handle `close()` followed by a
+    // re-link must re-establish the route, not silently reuse a dead state
+    // whose reroute/dial both no-op.
+    const state = new LinkState(
+      (socket) => { this.attachSocket(socket) },
+      this.ctx.logger,
+      () => this.resolveTokenForDial(),
+      instanceId,
+      trimBase(origin),
+    )
     this.linkStates.set(instanceId, state)
     state.dial()
     return state
-  }
-
-  /** Remove a closed outbound link's state so a later `link` re-dials fresh. */
-  forgetLink(instanceId: string): void {
-    this.linkStates.delete(instanceId)
   }
 
   /** Push one serialized lifecycle fact out to every linked peer over WS. */
@@ -459,11 +608,18 @@ export class InterconnectService extends Service {
     if (this.sockets.size === 0) return
     const frame: LinkFrame = { type: 'event', notification }
     const encoded = JSON.stringify(frame)
+    // A bidirectional pair owns two sockets (its dialed outbound link plus the
+    // peer's inbound link); send to each peer once so an event is not echoed
+    // back and delivered twice.
+    const sent = new Set<string>()
     for (const socket of this.sockets) {
       if (socket.readyState !== WebSocket.OPEN) {
         this.sockets.delete(socket)
         continue
       }
+      const peer = this.peerOf.get(socket)
+      if (peer !== undefined && sent.has(peer)) continue
+      if (peer !== undefined) sent.add(peer)
       socket.send(encoded)
     }
   }
@@ -474,28 +630,23 @@ export class InterconnectService extends Service {
    * result so a throwing handler cannot escape the socket's message callback.
    */
   private async handleMsgFrame(socket: WebSocket, reqId: string, message: LinkMessage): Promise<void> {
-    let result: SendResult
-    if (message.kind === 'reply') {
-      result = await this.replyForSession({
-        sessionId: message.sessionId,
-        text: message.text,
-        ...(message.delivery === undefined ? {} : { delivery: message.delivery }),
-        ...(message.resume === undefined ? {} : { resume: message.resume }),
-      })
-    } else {
-      result = await this.deliver({
-        sessionId: message.sessionId,
-        text: message.text,
-        ...(message.sender === undefined ? {} : { sender: message.sender }),
-        ...(message.delivery === undefined ? {} : { delivery: message.delivery }),
-        ...(message.resume === undefined ? {} : { resume: message.resume }),
-      })
-    }
+    // Only `send` arrives over the wire: `reply` originates locally (the tool
+    // calls `reply()` which sends a regular `send` frame to the recalled
+    // sender). A remote `reply` frame would relay arbitrary text through this
+    // instance's sender map, so the schema does not admit it.
+    const result = await this.deliver({
+      sessionId: message.sessionId,
+      text: message.text,
+      /* v8 ignore next 1 -- schemastery resolves an absent optional `sender` to an empty object, never undefined. */
+      ...(message.sender === undefined ? {} : { sender: message.sender }),
+      ...(message.delivery === undefined ? {} : { delivery: message.delivery }),
+      ...(message.resume === undefined ? {} : { resume: message.resume }),
+    })
     this.sendFrame(socket, { type: 'msg-result', reqId, result })
   }
 
   /** Dispatch one inbound `query` frame (ping/list/event) and answer on the socket. */
-  private async handleQueryFrame(socket: WebSocket, reqId: string, query: QueryMessage): Promise<void> {
+  private handleQueryFrame(socket: WebSocket, reqId: string, query: QueryMessage): void {
     let result: unknown
     if (query.kind === 'ping') {
       result = { pong: true, instance: this.instanceId }
@@ -534,7 +685,7 @@ export class InterconnectService extends Service {
     // contradicts `send`.
     const reachable = this.ctx.agents.list()
       .filter(agent => !isSessionOwnedBySubagent(this.ctx, agent.session, agent))
-    const sessions = reachable.map((agent): SessionSummary => {
+    const sessions = reachable.map((agent): InterconnectSessionSummary => {
       let title: string | undefined
       try {
         const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
@@ -575,7 +726,7 @@ export class InterconnectService extends Service {
     const lookup = this.ctx.get('typert')?.lookups.get('agent')
     if (lookup === undefined) return { reason: 'session-not-live' }
     try {
-      const resolved = await lookup.resolve(payload.sessionId as never)
+      const resolved = await lookup.resolve(payload.sessionId)
       // `undefined` is not a failed wake: the base `agent` provider is a plain
       // registry read, so a deployment without the Host's resuming resolver
       // answers undefined for every id that is not already live. Reporting
@@ -586,7 +737,9 @@ export class InterconnectService extends Service {
     } catch (error) {
       // A refusing resolver is an expected outcome, not a fault of this
       // instance: the id may not exist, or a subagent owner may hold it.
-      this.ctx.logger.info(`interconnect: resume refused for ${payload.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      this.ctx.logger.info(
+        `interconnect: resume refused for ${payload.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
       return { reason: 'resume-failed' }
     }
   }
@@ -596,9 +749,18 @@ export class InterconnectService extends Service {
    * when the sender asked and this receiver allows it.
    */
   private async deliver(payload: SendPayload): Promise<SendResult> {
+    // A delivery that outlived the service fiber (an inbound frame already in
+    // flight when the plugin unloaded) must not drive a disposed agent.
+    if (this.disposed) return { delivered: false, instance: this.instanceId, reason: 'unreachable' }
     let agent = this.ctx.agents.get(payload.sessionId as Agent['id'])
     if (agent === undefined) {
       const woken = await this.wake(payload)
+      // The fiber may have unwound while the wake resolution was in flight;
+      // re-check before touching a woken agent. oxlint's flow analysis treats
+      // the two `disposed` reads as the same value, but `await` is a yield
+      // point at which the teardown effect can run.
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the service can dispose during the wake await
+      if (this.disposed) return { delivered: false, instance: this.instanceId, reason: 'unreachable' }
       if ('reason' in woken) {
         return { delivered: false, instance: this.instanceId, reason: woken.reason }
       }
@@ -617,15 +779,15 @@ export class InterconnectService extends Service {
     // up reply attribution; the model-facing `content` stays exactly the text
     // that crossed the wire. An absent sender resolves to `{}` under schematery,
     // so test for a real identity rather than `undefined`.
+    // The wire shape is untrusted here: a peer may send a partial identity,
+    // so validate both fields at runtime before recording a reply target.
     const sender = ((): SenderIdentity | undefined => {
-      const candidate = payload.sender
-      return candidate === undefined || typeof candidate.instanceId !== 'string'
-        ? undefined
-        : candidate
+      const candidate: unknown = payload.sender
+      if (typeof candidate !== 'object' || candidate === null) return undefined
+      const record = candidate as Record<string, unknown>
+      if (typeof record.instanceId !== 'string' || typeof record.sessionId !== 'string') return undefined
+      return { instanceId: record.instanceId, sessionId: record.sessionId }
     })()
-    if (sender !== undefined) {
-      this.senders.set(payload.sessionId, sender)
-    }
     // Attribute the message to this plugin, not to the human operator: the
     // receiving agent must be able to tell a cross-instance handoff from text
     // its own user typed. The summary names the sender when one was carried, so
@@ -660,22 +822,21 @@ export class InterconnectService extends Service {
       case 'followup':
         agent.followup(message)
         break
+      /* v8 ignore next -- closed-union exhaustiveness guard */
+      default:
+        assertNever(mode)
+    }
+    // Record the reply target only after the message committed: a delivery that
+    // threw leaves no sender behind, so a later reply cannot target a session
+    // whose handoff never landed. A message that carries NO sender (an old peer,
+    // or an anonymous relay) clears any earlier mapping, so a reply cannot go
+    // back to a stale sender from a previous handoff.
+    if (sender !== undefined) {
+      this.senders.set(payload.sessionId, sender)
+    } else {
+      this.senders.delete(payload.sessionId)
     }
     return { delivered: true, instance: this.instanceId, delivery: mode }
-  }
-
-  /**
-   * Inbound `reply` dispatch: forward a request to {link reply}, resolving the
-   * outbound sender for the named local session. Kept separate from {link
-   * deliver} so the two wire endpoints stay distinct in the request pipeline.
-   */
-  private async replyForSession(payload: ReplyPayload): Promise<SendResult> {
-    return this.reply({
-      sessionId: payload.sessionId,
-      text: payload.text,
-      ...(payload.delivery === undefined ? {} : { delivery: payload.delivery }),
-      ...(payload.resume === undefined ? {} : { resume: payload.resume }),
-    })
   }
 
   private async resolveToken(): Promise<string | undefined> {
@@ -683,8 +844,7 @@ export class InterconnectService extends Service {
     return credential === undefined || credential.value.length === 0 ? undefined : credential.value
   }
 
-  /** Resolve the shared token for an outbound dial (same source as inbound). */
-  resolveTokenForDial(): Promise<string | undefined> {
+  private resolveTokenForDial(): Promise<string | undefined> {
     return this.resolveToken()
   }
 
@@ -720,9 +880,12 @@ export class InterconnectService extends Service {
   /**
    * Install frame + liveness handling on one socket and add it to the live
    * pool. Used by both the server half (accepted upgrade) and the client half
-   * (outbound dial), so a single socket carries events both directions.
+   * (outbound dial), so a single socket carries events both directions. Not a
+   * model-facing entry point; the outbound dial reaches it through a private
+   * closure.
+   * @param websocket - the accepted or dialed socket to install handlers on.
    */
-  attachSocket(websocket: WebSocket): void {
+  private attachSocket(websocket: WebSocket): void {
     this.sockets.add(websocket)
     ;(websocket as WebSocket & { isAlive: boolean }).isAlive = true
     websocket.on('pong', () => {
@@ -745,20 +908,35 @@ export class InterconnectService extends Service {
   /** Parse and route one inbound link frame, attributing events to the socket's announced peer. */
   private handleFrame(socket: WebSocket, data: RawData): void {
     if (Array.isArray(data)) return // binary frames are a protocol violation; ignore
+    // Cap inbound frames well below ws's 100 MiB default: a link frame is at
+    // most one small message plus metadata, so a larger frame is a hostile or
+    // broken peer, not a legitimate handoff.
+    if (data.byteLength > MAX_LINK_FRAME_BYTES) {
+      this.ctx.logger.warn('interconnect: dropping oversized link frame')
+      return
+    }
     const text = Buffer.isBuffer(data) ? data.toString('utf8') : Buffer.from(data).toString('utf8')
-    let frame: LinkFrame
+    let parsed: unknown
     try {
-      frame = z.resolve(JSON.parse(text), linkFrameSchema, {})[0] as LinkFrame
+      parsed = z.resolve(JSON.parse(text), linkFrameSchema, {})[0]
     } catch {
       this.ctx.logger.warn('interconnect: dropping malformed link frame')
       return
     }
+    // schemastery passes a JSON `null` through a union untouched; reject it
+    // like any other malformed frame instead of dereferencing null below.
+    if (parsed === null || typeof parsed !== 'object') {
+      this.ctx.logger.warn('interconnect: dropping malformed link frame')
+      return
+    }
+    const frame = parsed as LinkFrame
     if (frame.type === 'hello') {
       this.peerOf.set(socket, frame.sender)
       return
     }
     if (frame.type === 'event') {
       const sender = this.peerOf.get(socket) ?? 'unknown-peer'
+      const kind = frame.notification.kind // validated above; do not re-read the frame inside the catch
       try {
         this.receiveEvent({ sender, notification: frame.notification })
       } catch (error) {
@@ -767,21 +945,30 @@ export class InterconnectService extends Service {
         // synchronous `message` handler, so an escaping throw becomes an
         // uncaughtException — letting any remote peer kill this process by sending
         // an event a local listener happens to mishandle.
-        this.ctx.logger.warn(`interconnect: listener for a ${frame.notification.kind} event from ${sender} threw: ${error instanceof Error ? error.message : String(error)}`)
+        this.ctx.logger.warn(
+          `interconnect: listener for a ${kind} event from ${sender} threw: `
+            + (error instanceof Error ? error.message : String(error)),
+        )
       }
       return
     }
     if (frame.type === 'msg-result') {
       const pending = this.pendingMessages.get(frame.reqId)
-      if (pending !== undefined) {
-        ;(pending as MutablePendingMessage).resolve?.(frame.result)
+      // A `msg-result` settles only a `msg` request: a query awaiting its
+      // `query-result` must never be resolved by a mis-typed frame. The
+      // result shape is already enforced by the frame schema; msg requests
+      // carry no per-kind accept gate.
+      if (pending !== undefined && pending.kind === 'msg') {
+        ;pending.resolve?.(frame.result)
       }
       return
     }
     if (frame.type === 'query-result') {
       const pending = this.pendingMessages.get(frame.reqId)
-      if (pending !== undefined) {
-        ;(pending as MutablePendingMessage).resolve?.(frame.result)
+      // Only a result that satisfies the pending request's own shape settles
+      // it; anything else is dropped and the request times out as unreachable.
+      if (pending !== undefined && pending.kind === 'query' && (pending.accept === undefined || pending.accept(frame.result))) {
+        ;pending.resolve?.(frame.result)
       }
       return
     }
@@ -800,8 +987,8 @@ export class InterconnectService extends Service {
     }
     // `query`: an inbound discovery/event request. Answer asynchronously and
     // never let a throw escape the socket's synchronous message callback.
-    void Promise.resolve().then(async () => {
-      await this.handleQueryFrame(socket, frame.reqId, frame.query)
+    void Promise.resolve().then(() => {
+      this.handleQueryFrame(socket, frame.reqId, frame.query)
     }).catch((error: unknown) => {
       this.ctx.logger.warn(`interconnect: query ${frame.reqId} handler threw: ${error instanceof Error ? error.message : String(error)}`)
     })
@@ -824,30 +1011,35 @@ interface PendingMessage {
   readonly timer: ReturnType<typeof setTimeout>
 }
 interface MutablePendingMessage extends PendingMessage {
+  /** Whether the pending awaits a `msg-result` or a `query-result` frame. */
+  kind: 'msg' | 'query'
   resolve?: (result: unknown) => void
-  reject?: (error: unknown) => void
+  /** Shape gate for result frames: the answer must match the request's kind. */
+  accept?: (result: unknown) => boolean
 }
 
 /**
  * One outbound WebSocket peer link: dials, re-dials with backoff after an
- * unexpected drop, and pushes local events over the live socket. The owning
- * service streams events via {@link InterconnectService.broadcast} only to
- * sockets it accepted; this dialer keeps its own socket OUT of that set and
- * instead subscribes to local events through the service's fan-out via a
- * dedicated route below.
+ * unexpected drop, and joins the service's live socket pool once open, so
+ * local events fan out over the link and the peer's pushes come back in.
  */
 class LinkState implements WebSocketLinkHandle {
   private socket: WebSocket | undefined
+  private dialEpoch = 0
   private closed = false
   private retry = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  /** Dial-registered handlers, removed by reference on close/reroute so the pool-cleanup handlers attachSocket added stay alive. */
+  private dialListeners: { open: () => void; close: () => void; error: () => void } | undefined
 
   // `peer` is mutable so `reroute` can point the link at a new origin.
   peer: string
   readonly instanceId: string
 
   constructor(
-    private readonly owner: InterconnectService,
+    private readonly attachSocket: (socket: WebSocket) => void,
+    private readonly logger: LoggerService,
+    private readonly resolveToken: () => Promise<string | undefined>,
     instanceId: string,
     origin: string,
   ) {
@@ -859,9 +1051,23 @@ class LinkState implements WebSocketLinkHandle {
   reroute(origin: string): void {
     if (origin === this.peer) return
     this.peer = origin
+    // Cancel any in-flight dial: an epoch bump makes a pending token
+    // resolution discard itself, and a pending reconnect timer is cleared.
+    this.dialEpoch += 1
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
     const socket = this.socket
     if (socket !== undefined) {
-      socket.removeAllListeners()
+      // Remove only the dial handlers: the attachSocket pool-cleanup
+      // handlers must stay, or the terminated socket lingers in the live
+      // pool and the heartbeat calls ping() on a non-OPEN socket.
+      this.removeDialListeners(socket)
+      // A CONNECTING socket emits 'error' asynchronously on terminate; keep a
+      // listener so the event cannot escape as an uncaughtException.
+      /* v8 ignore next 1 -- a CONNECTING terminate error is timing-dependent and does not fire in tests. */
+      socket.on('error', () => {})
       socket.terminate()
       this.socket = undefined
     }
@@ -870,36 +1076,68 @@ class LinkState implements WebSocketLinkHandle {
 
   /** Open the socket; reconnect is scheduled by the close handler. */
   dial(): void {
+    /* v8 ignore next 1 -- close() removes the link state from the map before any later dial can observe it. */
     if (this.closed) return
-    const url = new URL('/interconnect/link', this.peer)
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    void this.owner.resolveTokenForDial().then((token) => {
-      if (token === undefined || this.closed) return
+    const epoch = this.dialEpoch
+    let url: URL
+    try {
+      url = linkUrl(this.peer)
+    } catch {
+      // The constructor pre-validates configured origins; a runtime `link`/`reroute`
+      // with a malformed origin must degrade to a down link, not a thrown dial.
+      this.logger.warn(`interconnect: invalid peer origin ${this.peer}; link to ${this.instanceId} stays down`)
+      return
+    }
+    void this.resolveToken().then((token) => {
+      if (token === undefined) {
+        this.logger.warn(`interconnect: no shared token configured; peer ${this.instanceId} link stays down until one is set`)
+        return
+      }
+      if (this.closed || epoch !== this.dialEpoch) return
       const socket = new WebSocket(url, {
         headers: { authorization: `Bearer ${token}` },
+        maxPayload: MAX_LINK_FRAME_BYTES,
+        // A peer that accepts TCP but never completes the upgrade would leave
+        // the socket in CONNECTING forever: no open (so no heartbeat) and no
+        // close (so no reconnect). ws aborts the connection past the handshake
+        // window, so its own error+close fire and the close handler schedules
+        // a reconnect — and ws owns the timer, so nothing leaks on teardown.
+        handshakeTimeout: LINK_HANDSHAKE_TIMEOUT_MS,
       })
       this.socket = socket
-      socket.once('open', () => {
+      const onOpen = (): void => {
         this.retry = 0
         // Same handler as the server half: adds to the live pool and announces
         // this instance's identity over the now-open link.
-        this.owner.attachSocket(socket)
-      })
-      socket.once('close', () => {
+        this.attachSocket(socket)
+      }
+      const onClose = (): void => {
+        /* v8 ignore next 1 -- close() strips this listener before terminating, so the guard is only reachable on real drops. */
         if (this.closed) return
         this.scheduleReconnect()
-      })
-      socket.on('error', () => {
+      }
+      const onError = (): void => {
         // close follows; reconnect is scheduled there.
-      })
+      }
+      this.dialListeners = { open: onOpen, close: onClose, error: onError }
+      socket.once('open', onOpen)
+      socket.once('close', onClose)
+      socket.on('error', onError)
     }).catch(() => {
       // A rejecting token read must not become an unhandled rejection, and must
       // not silently end the dial loop either: without this the link would stay
       // down until the process restarted, since no socket was ever created and
-      // so no `close` will arrive to schedule the retry.
-      if (this.closed) return
+      // so no `close` will arrive to schedule the retry. A failure from a
+      // SUPERSEDED dial epoch (a reroute happened while the token read was in
+      // flight) schedules nothing: the reroute already dialed.
+      if (this.closed || epoch !== this.dialEpoch) return
       this.scheduleReconnect()
     })
+  }
+
+  /** Whether this link has been closed; a closed state is never reused by `link()`. */
+  isClosed(): boolean {
+    return this.closed
   }
 
   /** Whether this link currently holds an open socket that can carry frames. */
@@ -910,6 +1148,7 @@ class LinkState implements WebSocketLinkHandle {
   /** Write one frame over this link's outbound socket; false when not open. */
   sendFrame(frame: LinkFrame): boolean {
     const socket = this.socket
+    /* v8 ignore next 1 -- callers gate on writable(), which reads the same readyState synchronously; this guard is unreachable. */
     if (socket === undefined || socket.readyState !== WebSocket.OPEN) return false
     socket.send(JSON.stringify(frame))
     return true
@@ -917,16 +1156,34 @@ class LinkState implements WebSocketLinkHandle {
 
   close(): void {
     this.closed = true
-    this.owner.forgetLink(this.peer)
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer)
     const socket = this.socket
     if (socket !== undefined) {
-      socket.removeAllListeners()
+      // Remove only the dial handlers (see reroute): the attachSocket
+      // pool-cleanup handlers must stay so the pool does not retain the
+      // terminated socket.
+      this.removeDialListeners(socket)
+      // A CONNECTING socket emits 'error' asynchronously on terminate; keep a
+      // listener so the event cannot escape as an uncaughtException. Callers
+      // delete this link's state from the map themselves.
+      /* v8 ignore next 1 -- a CONNECTING terminate error is timing-dependent and does not fire in tests. */
+      socket.on('error', () => {})
       socket.terminate()
     }
   }
 
+  /** Detach the dial-registered handlers from a socket before terminating it. */
+  private removeDialListeners(socket: WebSocket): void {
+    const listeners = this.dialListeners
+    if (listeners === undefined) return
+    socket.removeListener('open', listeners.open)
+    socket.removeListener('close', listeners.close)
+    socket.removeListener('error', listeners.error)
+    this.dialListeners = undefined
+  }
+
   private scheduleReconnect(): void {
+    /* v8 ignore next 1 -- the 30s cap binds only after five consecutive reconnect failures (~31s of wall time). */
     const delay = Math.min(30000, 1000 * 2 ** this.retry)
     this.retry += 1
     this.reconnectTimer = setTimeout(() => {
@@ -936,14 +1193,36 @@ class LinkState implements WebSocketLinkHandle {
   }
 }
 
-/** Constant-time string comparison over the ASCII-encoded lengths. */
+/**
+ * Constant-time comparison of two strings. Each side is digest-normalized
+ * first, so the buffers passed to `timingSafeEqual` always match in length:
+ * a malformed multi-byte Authorization header cannot reach the crypto layer
+ * with a mismatched length, and the comparison leaks no length information.
+ */
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  let diff = 0
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return constantTimeEqual(createHash('sha256').update(a, 'utf8').digest(), createHash('sha256').update(b, 'utf8').digest())
+}
+
+/**
+ * Map one HTTP(S) peer origin to the WebSocket URL of its link route. Only
+ * the plain-HTTP schemes are rewritten to their WebSocket equivalents; an
+ * explicit `wss:` (or `ws:`) origin keeps its scheme, so a TLS peer link is
+ * never downgraded to plaintext. Any other scheme (ftp:, file:, ...) is
+ * rejected so a misconfigured origin fails loudly instead of feeding
+ * `new WebSocket` a URL it cannot dial.
+ * @param origin - peer origin as configured, e.g. `http://127.0.0.1:13080`.
+ * @returns the link URL, e.g. `ws://127.0.0.1:13080/interconnect/link`.
+ * @throws TypeError when the origin is not a valid absolute URL or maps to a
+ *   non-WebSocket protocol.
+ */
+export function linkUrl(origin: string): URL {
+  const url = new URL('/interconnect/link', origin)
+  if (url.protocol === 'http:') url.protocol = 'ws:'
+  else if (url.protocol === 'https:') url.protocol = 'wss:'
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    throw new TypeError(`interconnect: unsupported peer origin protocol ${url.protocol}`)
   }
-  return diff === 0
+  return url
 }
 
 function trimBase(baseUrl: string): string {

@@ -2,6 +2,30 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.0（2026-09-14）
+
+把 monorepo #3243 分支（08-28～08-30 两轮 review 收敛）的全部加固回移到独立仓库，使合入主仓库之前的现役版本不再带可被对端触发的崩溃。
+
+### 修复（安全与健壮性）
+
+- **拒绝畸形帧**：JSON `null` 帧此前会被解引用（`TypeError: Cannot read properties of null (reading 'type')`），在 socket 的 message 回调里逃逸为 uncaughtException——任何持共享 token 的对端都能触发进程崩溃；现在解析后拒绝非对象帧。同时拒绝超出上限的帧，并在装载期拒绝非 WebSocket 协议的 origin。
+- **心跳不再对非 OPEN socket 调 `ping()`**：`reroute()`/`close()` 此前用 `removeAllListeners()`，连带剥掉池清理 handler，terminated socket 留在 live pool，30 秒心跳对其 `ping()` 同步抛异常。改为按引用移除 dial 注册的 handler，并在 sweep 前检查 `readyState`。
+- **结果帧绑定到请求类型**：`msg-result` 只结算 `msg` pending、`query-result` 只结算 `query` pending，错形答复不再串进错误的 pending。
+- **dial epoch**：reroute 之后，被取代的 dial epoch 的 token 读取失败不再触发重拨，避免双拨。
+- **auth 比较**改为 SHA-256 摘要上的常数时间比较。
+- **帧判别式必填**：`type` / `kind` 不再可选，避免缺失字段落到解引用分支。
+
+### 变更（破坏性）
+
+- **`interconnect_reply` 不再接受 `sessionId`**：回信 session 是执行该工具的 agent 自己的 session；线上的 `reply` 变体已移除，远端无法借本机 sender map 转发任意文本。模型只需传 `text`。
+- **服务不再强依赖 webServer**：`inject` 从 `['webServer', 'agents', 'credentials']` 改为 `['agents', 'credentials']`（`dsh.plugin.json` 同步）。有 webserver 时注册入站升级路由，没有时仍会拨号已配置对端并经出站链接投递，即仅出站模式。
+
+### 验证
+
+- 单测从 40 增至 145（移植上游全部回归用例）。
+- 两条 P0 负例实测：摘除 null 帧守卫、摘除心跳 `readyState` 守卫，对应用例各自转红，再还原。
+- `pnpm run check`（typecheck + 145/145 tests + build）全绿。
+
 ## 0.10.1（2026-09-01）
 
 修复发布版本在真实 DSH 运行时无法加载的问题（issue #5）。

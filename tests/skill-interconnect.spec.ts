@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import { describe, expect, it } from 'vitest'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as skillInterconnect from '../src/skill-interconnect/index.ts'
@@ -30,7 +31,7 @@ describe('skill-interconnect', () => {
     const listed = await ctx.skills.list()
     expect(listed).toEqual([{
       name: 'dsh-interconnect',
-      description: 'Use the dsh-interconnect tools to exchange messages between DSH sessions, instances, and machines: list live peers/sessions, send messages, reply to the last sender, and probe liveness. Use whenever you need to message another DSH agent, coordinate across sessions, or respond to an incoming interconnect handoff.',
+      description: 'Use the dsh-interconnect tools to exchange messages between DSH sessions, instances, and machines: list live sessions on a known peer instance, send messages, reply to the last sender, and probe liveness. Use whenever you need to message another DSH agent, coordinate across sessions, or respond to an incoming interconnect handoff.',
       invocation: { modelInvocable: true, userInvocable: true },
       provider: 'dsh-interconnect',
       source: 'bundled',
@@ -56,5 +57,20 @@ describe('skill-interconnect', () => {
     expect(body).toContain('interconnect_list')
     expect(body).toContain('interconnect_ping')
     expect(body).toContain('interconnect_reply')
+  })
+})
+
+describe('skill-interconnect Loader shape', () => {
+  it('has the namespace-plugin export shape (no stray default) so the Loader keeps name/inject/apply', () => {
+    expect('default' in skillInterconnect).toBe(false)
+    expect(skillInterconnect.name).toBe('skill-interconnect')
+    expect(skillInterconnect.inject).toEqual(['skills', 'interconnect'])
+
+    const loader = Object.create(Loader.prototype) as Loader
+    const unwrapped = loader.unwrapExports(skillInterconnect) as Record<string, unknown>
+    expect(unwrapped).toBe(skillInterconnect)
+    expect(unwrapped.name).toBe('skill-interconnect')
+    expect(unwrapped.inject).toEqual(['skills', 'interconnect'])
+    expect(typeof unwrapped.apply).toBe('function')
   })
 })

@@ -20,9 +20,9 @@ job is only to pick the right tool and the right target.
   instance/session identity is attached automatically by the tool, so you must
   NOT pass a sender parameter.
 - `interconnect_reply` — send a message back to the peer that this session last
-  received an interconnect message from. Pass only the LOCAL session id that
-  received the message and the reply text. The remote target is recalled
-  automatically; do not try to look up or pass the sender address again.
+  received an interconnect message from. Pass only the reply text: the replying
+  session is this agent's own session, and the remote target is recalled
+  automatically, so do not try to look up or pass the sender address again.
 
 ## Sender identity is automatic
 
@@ -41,8 +41,8 @@ addresses.
    `interconnect_list(instanceId=...)` and choose a live session.
 2. Call `interconnect_send(instanceId=..., sessionId=..., text=...)`.
 3. When a message arrives on your side and you need to respond, call
-   `interconnect_reply(sessionId=<your-local-session-id>, text=...)`. The
-   recorded sender is used as the destination.
+   `interconnect_reply(text=...)`. The replying session is this agent's own
+   session, and the recorded sender is used as the destination.
 
 ## Delivery modes
 

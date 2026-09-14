@@ -30,7 +30,8 @@ const RESOURCE_BASE = {
   path: fileURLToPath(new URL('../../assets/', import.meta.url)),
 } as const
 const INVOCATION = { modelInvocable: true, userInvocable: true } as const
-const DESCRIPTION = 'Use the dsh-interconnect tools to exchange messages between DSH sessions, instances, and machines: list live peers/sessions, send messages, reply to the last sender, and probe liveness. Use whenever you need to message another DSH agent, coordinate across sessions, or respond to an incoming interconnect handoff.'
+const DESCRIPTION = 'Use the dsh-interconnect tools to exchange messages between DSH sessions, instances, and machines: list live sessions on a known peer instance, send messages, reply to the last sender, and probe liveness. Use whenever you need to message another DSH agent, coordinate across sessions, or respond to an incoming interconnect handoff.'
+/* jscpd:ignore-start -- the bundled-skill provider shape is the same required boilerplate as skill-badge. */
 const CANDIDATE: SkillCandidate = {
   name: 'dsh-interconnect',
   description: DESCRIPTION,
@@ -57,6 +58,7 @@ const provider: SkillProvider = {
     }
   },
 }
+/* jscpd:ignore-end */
 
 /** Cordis plugin name. */
 export const name = 'skill-interconnect'
