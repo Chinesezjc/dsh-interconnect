@@ -2,6 +2,18 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.7（2026-09-15）
+
+文档修正，无代码变化。
+
+### 变更
+
+- README 的 `list` 说明改为**行数与字节双上限**：补充 `MAX_LIST_ROWS_BYTES`（链路帧上限减去 4 KiB 的 `query-result` 信封）以及「标题很长时会提前截断」的行为；验证章节的单测数更新为 163。
+
+### 验证
+
+- `pnpm run check`（typecheck + 163/163 tests + build）全绿。
+
 ## 0.11.6（2026-09-15）
 
 跟随 #3243 分支 head（`71f5326444`）。

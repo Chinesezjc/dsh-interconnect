@@ -55,9 +55,10 @@ session-b07326da-…                          [running]
 只列 live session 是有意的：`send` 能到达的正好是这些。对端存在但没有运行 agent 的 session
 不会出现在列表里，也收不到消息。
 
-答案有行数上限（`MAX_LISTED_SESSIONS`，100 行）：整帧必须待在链路的帧上限内，ws 对超限帧会
-直接关闭链路，所以 live session 极多的对端只回答前若干行，而不是把传输打断。ping 与 list 的
-答复还会按调用方问的 kind 校验形状，形状不符按「无答复」处理（对应 `unreachable`）。
+答案有双重上限：行数（`MAX_LISTED_SESSIONS`，100 行）与字节预算（`MAX_LIST_ROWS_BYTES`，等于链路
+帧上限减去 4 KiB 的 `query-result` 信封）。整帧必须待在链路的帧上限内，ws 对超限帧会直接关闭
+链路，所以 live session 极多、或标题很长时，对端只回答能装下的前若干行，而不是把传输打断。
+ping 与 list 的答复还会按调用方问的 kind 校验形状，形状不符按「无答复」处理（对应 `unreachable`）。
 
 ### 回复（`reply`）
 
@@ -265,7 +266,7 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 154/154 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧绑定、list 上限等回归用例）；
+- 163/163 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限等回归用例）；
   类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
