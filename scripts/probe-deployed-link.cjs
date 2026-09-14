@@ -7,6 +7,7 @@ const ws = new WebSocket(`ws://127.0.0.1:${process.env.IC_PORT ?? '3080'}/interc
   headers: { authorization: `Bearer ${token}` },
 })
 let results = 0
+let msgResults = 0
 ws.on('open', () => {
   ws.send(JSON.stringify({ type: 'hello', sender: 'probe' }))
   ws.send(JSON.stringify({ type: 'query', reqId: 'q1', query: { kind: 'ping' } }))
@@ -18,11 +19,25 @@ ws.on('open', () => {
     reqId: 'q3',
     query: { kind: 'event', notification: { kind: 'agent/created', sessionId: 'probe-session' } },
   }))
+  // A delivery to a session that does not exist here exercises the `msg` path and
+  // the delivered/reason shape a peer actually reads.
+  ws.send(JSON.stringify({
+    type: 'msg',
+    reqId: 'm1',
+    message: { kind: 'send', sessionId: 'probe-nonexistent-session', text: 'probe' },
+  }))
 })
 ws.on('message', (data) => {
   let frame
   try { frame = JSON.parse(String(data)) } catch { console.log('NON-JSON'); return }
   if (frame.type === 'hello') { console.log('hello from:', frame.sender); return }
+  if (frame.type === 'msg-result') {
+    msgResults += 1
+    const result = frame.result ?? {}
+    console.log(`msg: delivered=${String(result.delivered)} reason=${String(result.reason ?? '-')} instance=${String(result.instance ?? '-')}`)
+    if (results >= 3 && msgResults >= 1) { ws.close(); process.exit(0) }
+    return
+  }
   if (frame.type !== 'query-result') return
   results += 1
   const result = frame.result ?? {}
@@ -38,8 +53,8 @@ ws.on('message', (data) => {
   } else {
     console.log('other result:', JSON.stringify(result).slice(0, 140))
   }
-  if (results >= 3) { ws.close(); process.exit(0) }
+  if (results >= 3 && msgResults >= 1) { ws.close(); process.exit(0) }
 })
 ws.on('unexpected-response', (_req, res) => { console.error('HTTP-STATUS', res.statusCode); process.exit(2) })
 ws.on('error', (err) => { console.error('WS-ERR', err.message); process.exit(1) })
-setTimeout(() => { console.error('TIMEOUT results=' + String(results)); process.exit(3) }, 15000)
+setTimeout(() => { console.error(`TIMEOUT results=${String(results)} msgResults=${String(msgResults)}`); process.exit(3) }, 15000)
