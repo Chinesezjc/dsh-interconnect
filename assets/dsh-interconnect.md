@@ -20,9 +20,9 @@ job is only to pick the right tool and the right target.
   instance/session identity is attached automatically by the tool, so you must
   NOT pass a sender parameter.
 - `interconnect_reply` — send a message back to the peer that this session last
-  received an interconnect message from. Pass only the reply text: the replying
+  received an interconnect message from. Pass only the reply text. The replying
   session is this agent's own session, and the remote target is recalled
-  automatically, so do not try to look up or pass the sender address again.
+  automatically; do not try to look up or pass an address again.
 
 ## Sender identity is automatic
 

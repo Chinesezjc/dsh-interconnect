@@ -2,6 +2,19 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.5（2026-09-15）
+
+跟随 #3243 分支 head（`c83b249064`）同步 skill 正文——这是此前只核对四个 `.ts` 时漏掉的文件。
+
+### 变更
+
+- `assets/dsh-interconnect.md`（模型可见的 skill 正文）与上游逐字节一致：`interconnect_reply` 的说明回到上游措辞（`…recalled automatically; do not try to look up or pass an address again.`），不再用独立仓库特有的 `sender` 表述。
+
+### 验证
+
+- `pnpm run check`（typecheck + 158/158 tests + build）全绿。
+- 该文件与 head 逐字节 diff 为 0。
+
 ## 0.11.4（2026-09-15）
 
 跟随 #3243 分支 head（`c83b249064`）。
