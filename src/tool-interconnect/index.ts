@@ -14,6 +14,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // Activates the `Context.interconnect` merge declared by the interconnect service plugin.
+// The row bound comes from the service that answers `interconnect_list`; the import also
+// activates the `Context.interconnect` merge that service declares.
 import { MAX_LISTED_SESSIONS } from '../interconnect/index.ts'
 
 /** Cordis plugin name. */
@@ -133,7 +135,7 @@ export function apply(ctx: Context): void {
         const text = ((): string => {
           switch (value.reason) {
             case 'unreachable':
-              return `not delivered: ${value.instance} did not answer (unreachable or unauthorized)`
+              return `not delivered: ${value.instance} did not answer (unreachable)`
             case 'resume-refused':
               return `not delivered: ${value.instance} does not allow waking persisted sessions`
             case 'resume-failed':
@@ -198,7 +200,7 @@ export function apply(ctx: Context): void {
         type: 'text',
         text: value.reachable
           ? `reachable: ${value.instance ?? '(unknown instance)'}`
-          : 'unreachable or unauthorized',
+          : 'unreachable',
       }],
     },
     async execute(args, exec) {
@@ -212,7 +214,7 @@ export function apply(ctx: Context): void {
     name: 'interconnect_list',
     description: 'List the live sessions on a peer DSH instance, so a message can be addressed without '
       + 'knowing a session id in advance. Every returned sessionId is a valid interconnect_send target at '
-      + 'the time of the call. Only sessions with a running agent appear, and a long listing stops at a '
+      + 'the time of the call. Only live sessions appear, and a long listing stops at a '
       + 'size bound, so a live session missing from it may simply not fit; reaching a persisted session '
       + 'requires interconnect_send with resume set.',
     parameters: {
@@ -245,7 +247,7 @@ export function apply(ctx: Context): void {
         },
       },
       render: (_args, value) => {
-        if (!value.reachable) return [{ type: 'text', text: 'unreachable or unauthorized' }]
+        if (!value.reachable) return [{ type: 'text', text: 'unreachable' }]
         const sessions = value.sessions ?? []
         if (sessions.length === 0) {
           return [{ type: 'text', text: `no live sessions on ${value.instance ?? '(unknown instance)'}` }]
@@ -323,7 +325,7 @@ export function apply(ctx: Context): void {
             return 'not delivered: the recorded sender\'s session belongs to a subagent and its parent agent owns delivery'
           }
           if (value.reason === 'unreachable') {
-            return 'not delivered: the recorded sender did not answer (unreachable or unauthorized)'
+            return 'not delivered: the recorded sender did not answer (unreachable)'
           }
           if (value.reason === 'resume-refused') {
             return 'not delivered: the recorded sender does not allow waking persisted sessions'
@@ -338,9 +340,7 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       if (exec.agent === undefined) {
-        // No executing session means no recorded sender to reply to; the
-        // closer existing reason states that, and its render text names the
-        // missing sender identity instead of a dead remote session.
+        // No executing session means no recorded sender to reply to.
         return { delivered: false, instance: 'unknown', reason: 'no-sender-known' }
       }
       const result = await raceSignal(exec.signal, interconnect.reply({

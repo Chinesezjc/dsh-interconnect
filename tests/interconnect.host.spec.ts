@@ -1521,7 +1521,7 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     const { socket, handlers } = fakeSocket()
     attachSocket(receiver.service, socket)
     handlers.get('message')!(JSON.stringify({ type: 'event', notification: { kind: 'agent/created', sessionId: 's1' } }))
-    expect(warns.some(line => line.includes('listener for a agent/created event'))).toBe(true)
+    await waitUntil(() => warns.some(line => line.includes('listener for a agent/created event')))
     await receiver.dispose()
   })
 
@@ -1533,7 +1533,25 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     const { socket, handlers } = fakeSocket()
     attachSocket(receiver.service, socket)
     handlers.get('message')!(JSON.stringify({ type: 'event', notification: { kind: 'agent/created', sessionId: 's1' } }))
-    expect(warns.some(line => line.includes('plain-string-boom'))).toBe(true)
+    await waitUntil(() => warns.some(line => line.includes('plain-string-boom')))
+    await receiver.dispose()
+  })
+
+  it('contains an event listener that rejects asynchronously', async () => {
+    const receiver = await mounted('secret', new Set([]))
+    const warns: string[] = []
+    vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation((message: string) => { warns.push(message) })
+    // `ctx.emit` would leave this rejection unhandled; the service dispatches
+    // through `ctx.parallel` so the failure is logged like a synchronous throw.
+    receiver.ctx.on(
+      'interconnect/event',
+      // oxlint-disable-next-line typescript/no-misused-promises -- the listener's rejected promise is exactly the case under test.
+      async () => { throw new Error('async listener exploded') },
+    )
+    const { socket, handlers } = fakeSocket()
+    attachSocket(receiver.service, socket)
+    handlers.get('message')!(JSON.stringify({ type: 'event', notification: { kind: 'agent/created', sessionId: 's1' } }))
+    await waitUntil(() => warns.some(line => line.includes('async listener exploded')))
     await receiver.dispose()
   })
 
@@ -1562,7 +1580,7 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     await receiver.dispose()
   })
 
-  it('surfaces an inbound event query and contains a throwing listener', async () => {
+  it('answers an inbound event query while containing a throwing listener', async () => {
     const receiver = await mounted('secret', new Set([]))
     const warns: string[] = []
     vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation((message: string) => { warns.push(message) })
@@ -1574,8 +1592,15 @@ describe('interconnect inbound frame handling on a fake socket', () => {
       reqId: 'q-2',
       query: { kind: 'event', notification: { kind: 'agent/created', sessionId: 's1' } },
     }))
-    await wait(30)
-    expect(warns.some(line => line.includes('query q-2 handler threw'))).toBe(true)
+    // The listener failure is contained inside the event dispatch, so the
+    // query still lands its ack and the handler itself never throws.
+    await waitUntil(() => warns.some(line => line.includes('query listener exploded')))
+    expect(warns.some(line => line.includes('query q-2 handler threw'))).toBe(false)
+    expect(socket.sent).toContainEqual(JSON.stringify({
+      type: 'query-result',
+      reqId: 'q-2',
+      result: { accepted: true },
+    }))
     await receiver.dispose()
   })
 
@@ -1925,20 +1950,33 @@ describe('interconnect inbound reply frames and socket liveness', () => {
     await receiver.dispose()
   })
 
-  it('renders a non-Error query failure as a string', async () => {
-    const receiver = await mounted('secret', new Set([]))
+  it('reports a query handler failure instead of letting it escape the socket', async () => {
+    const agents = {
+      ...fakeAgents(new Map(), new Set()),
+      list: (): never => { throw new Error('agent listing exploded') },
+    }
+    const receiver = await mounted('secret', new Set(), {}, 'followup', true, 'test-instance', { agents })
     const warns: string[] = []
     vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation((message: string) => { warns.push(message) })
-    receiver.ctx.on('interconnect/event', () => { throw 'plain-string-query-boom' })
     const { socket, handlers } = fakeSocket()
     attachSocket(receiver.service, socket)
-    handlers.get('message')!(JSON.stringify({
-      type: 'query',
-      reqId: 'q-3',
-      query: { kind: 'event', notification: { kind: 'agent/created', sessionId: 's1' } },
-    }))
-    await wait(30)
-    expect(warns.some(line => line.includes('plain-string-query-boom'))).toBe(true)
+    handlers.get('message')!(JSON.stringify({ type: 'query', reqId: 'q-3', query: { kind: 'list' } }))
+    await waitUntil(() => warns.some(line => line.includes('query q-3 handler threw: agent listing exploded')))
+    await receiver.dispose()
+  })
+
+  it('renders a non-Error query handler failure as a string', async () => {
+    const agents = {
+      ...fakeAgents(new Map(), new Set()),
+      list: (): never => { throw 'plain-string-query-boom' },
+    }
+    const receiver = await mounted('secret', new Set(), {}, 'followup', true, 'test-instance', { agents })
+    const warns: string[] = []
+    vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation((message: string) => { warns.push(message) })
+    const { socket, handlers } = fakeSocket()
+    attachSocket(receiver.service, socket)
+    handlers.get('message')!(JSON.stringify({ type: 'query', reqId: 'q-4', query: { kind: 'list' } }))
+    await waitUntil(() => warns.some(line => line.includes('query q-4 handler threw: plain-string-query-boom')))
     await receiver.dispose()
   })
 })

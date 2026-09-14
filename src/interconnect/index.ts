@@ -93,8 +93,9 @@ declare module '@deepseek-ai/cordis' {
     /**
      * A remote peer instance pushed one authenticated lifecycle notification
      * into this instance. Payload is the exact {@link EventNotification} that
-     * crossed the wire; listeners react synchronously on the frame handler.
-     * @mode emit
+     * crossed the wire; listeners run when the frame arrives, and a listener
+     * that throws or rejects is logged rather than propagated to the link.
+     * @mode parallel
      * @param notification - the serialized lifecycle fact that crossed the wire.
      * @param peer - the sender's self-reported instance id.
      */
@@ -787,10 +788,29 @@ export class InterconnectService extends Service {
     this.sendFrame(socket, { type: 'query-result', reqId, result })
   }
 
-  /** Surface one remote notification to local listeners and the log. */
+  /**
+   * Surface one remote notification to local listeners and the log.
+   *
+   * `ctx.parallel` is used instead of `ctx.emit`: `emit` maps listeners without
+   * awaiting them, so a listener that returns a rejected promise would surface
+   * as an unhandled rejection, while `parallel` settles every listener and
+   * aggregates their failures.
+   */
   private receiveEvent(eventPayload: EventPayload): void {
-    this.ctx.logger.info(`interconnect: remote event ${eventPayload.notification.kind} from ${eventPayload.sender}`)
-    this.ctx.emit('interconnect/event', eventPayload.notification, eventPayload.sender)
+    const { notification, sender } = eventPayload
+    this.ctx.logger.info(`interconnect: remote event ${notification.kind} from ${sender}`)
+    // A listener failure is the listener's bug and must not take down the link
+    // or this process, so the aggregate is logged instead of rethrown.
+    void this.ctx.parallel('interconnect/event', notification, sender).catch((error: unknown) => {
+      // `parallel` aggregates the rejected listeners into an AggregateError
+      // whose own message is empty, so the reasons carry the diagnostic.
+      /* v8 ignore next 1 -- `parallel` rejects only with the AggregateError it builds from listener results. */
+      const reasons = error instanceof AggregateError ? error.errors : [error]
+      const detail = reasons
+        .map(reason => (reason instanceof Error ? reason.message : String(reason)))
+        .join('; ')
+      this.ctx.logger.warn(`interconnect: listener for a ${notification.kind} event from ${sender} threw: ${detail}`)
+    })
   }
 
   /**
@@ -1118,21 +1138,10 @@ export class InterconnectService extends Service {
       return
     }
     if (frame.type === 'event') {
-      const sender = this.peerOf.get(socket) ?? 'unknown-peer'
-      const kind = frame.notification.kind // validated above; do not re-read the frame inside the catch
-      try {
-        this.receiveEvent({ sender, notification: frame.notification })
-      } catch (error) {
-        // `receiveEvent` emits `interconnect/event`, and Cordis propagates a
-        // listener throw back to the emitter. This runs inside the socket's
-        // synchronous `message` handler, so an escaping throw becomes an
-        // uncaughtException — letting any remote peer kill this process by sending
-        // an event a local listener happens to mishandle.
-        this.ctx.logger.warn(
-          `interconnect: listener for a ${kind} event from ${sender} threw: `
-            + (error instanceof Error ? error.message : String(error)),
-        )
-      }
+      // `receiveEvent` reports listener failures itself, synchronously or not,
+      // so this socket's synchronous `message` handler cannot be reached by a
+      // remote peer's event through a local listener.
+      this.receiveEvent({ sender: this.peerOf.get(socket) ?? 'unknown-peer', notification: frame.notification })
       return
     }
     if (frame.type === 'msg-result') {

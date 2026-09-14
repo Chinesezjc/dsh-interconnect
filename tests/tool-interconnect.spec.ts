@@ -428,7 +428,7 @@ describe('tool-interconnect rendering', () => {
     const unknown = tool.output.render(args, { reachable: true })
     expect((unknown as { text: string }[])[0]!.text).toBe('reachable: (unknown instance)')
     const unreachable = tool.output.render(args, { reachable: false })
-    expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable or unauthorized')
+    expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable')
     await dispose()
   })
 
@@ -453,7 +453,7 @@ describe('tool-interconnect rendering', () => {
     const tool = ctx.tools.get('interconnect_list')!
     const args = { instanceId: 'peer' }
     const unreachable = tool.output.render(args, { reachable: false })
-    expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable or unauthorized')
+    expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable')
     const empty = tool.output.render(args, { reachable: true, instance: 'peer', sessions: [] })
     expect((empty as { text: string }[])[0]!.text).toBe('no live sessions on peer')
     const rows = tool.output.render(args, {

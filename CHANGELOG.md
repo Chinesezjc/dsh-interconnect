@@ -2,6 +2,25 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.10（2026-09-15）
+
+跟随 #3243 分支新 head（`3f13d1c4b4`）：移植 `interconnect/event` 的异步 listener 修复与去鉴权词汇的文案，并修掉发布流程漏 bump 清单的缺陷。
+
+### 变更
+
+- **`interconnect/event` 改用 `ctx.parallel` 派发**：`ctx.emit` 不 await listener，异步 listener 的 rejection 会变成 unhandledRejection（Node ≥15 默认终止进程）—— 与同步抛错同属「远端 peer 可触发进程退出」这一类，此前只兜住了同步那条。现在 `parallel` 结算每个 listener，并用 AggregateError 聚合失败后记 warn；push 路径原先的 try/catch 随之删除（由 `receiveEvent` 自行上报失败）。
+- **模型可见文本去掉鉴权词汇**：`unreachable or unauthorized` → `unreachable`（send/reply/list 的 render 四处，以及 ping/list 的失败渲染），`interconnect_list` 描述里的 "Only sessions with a running agent appear" 改为 "Only live sessions appear"（服务端列的是 `agents.list()`，包含可被 followup/steer 唤醒的 idle agent）。
+- `interconnect_reply` 在无执行会话时返回 `no-sender-known` 的注释精简为上游措辞。
+- **修复发布缺陷**：0.11.9 的 tarball 里 `dsh.plugin.json` 仍写 `0.11.8`（历史上每次发布都 bump 过，仅该次漏掉）。本版对齐为 0.11.10，并新增 `tests/release-consistency.spec.ts` 守卫（清单的 name/version 必须等于 `package.json`，`files` 必须含清单与 patch）。
+- 新增两个仓库内工具（不随包发布）：`scripts/check-upstream-alignment.mjs` 对上游 head 断言四个源文件与三个 spec 的骨架一致、skill 正文逐字节一致；`scripts/probe-deployed-link.cjs` 对在跑实例做协议级探测。
+
+### 验证
+
+- `pnpm run check`（typecheck + 168/168 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against 3f13d1c4b4 across 7 ported files and 1 byte-exact asset`。
+- 新用例负例验证：把 `receiveEvent` 退回 `ctx.emit` → 新用例 `waitUntil timed out`，且 vitest 报 `Unhandled Errors: Error: async listener exploded`；还原后通过。
+- 制品审计：`npm pack --dry-run` 仍为 35 个文件，无 src/tests/scripts 泄漏。
+
 ## 0.11.9（2026-09-15）
 
 跟随 #3243 分支 head（`04c675d471`），同步 `list` 满页截断提示与 ping 文案。
