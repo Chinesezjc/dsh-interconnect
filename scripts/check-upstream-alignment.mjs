@@ -216,17 +216,54 @@ function compare(upstreamText, portedText) {
 /**
  * The retirement plan repoints a deployment profile at the monorepo's
  * `interconnect-profile` layer while keeping that profile's own override rows,
- * which keeps working only while both patches insert the same row ids. The
- * `name` values differ by design (this package's subpaths versus the scoped
- * packages), so only the ids are compared.
+ * which keeps working only while both patches insert the same row ids with the
+ * same config keys — the deployment overrides patch `config.instanceId` and
+ * `config.peers` by row id. The `name` values differ by design (this package's
+ * subpaths versus the scoped packages), so they are not compared.
  */
 const PATCH_ID_PAIRS = [
   ['packages/experimental/interconnect-profile/cordis.patch.yml', 'cordis.patch.yml'],
 ]
 
-/** Row ids a cordis patch inserts, in file order. */
-function patchRowIds(text) {
-  return [...text.matchAll(/^\s*-\s*id:\s*(\S+)\s*$/gmu)].map(match => match[1])
+/**
+ * Row ids a cordis patch inserts, mapped to their sorted `config` key names.
+ * @param text - the patch file's text.
+ * @returns one entry per inserted row, keyed by id.
+ */
+function patchRows(text) {
+  const rows = new Map()
+  let current = null
+  let configIndent = null
+  for (const line of text.split('\n')) {
+    const id = /^(\s*)-\s*id:\s*(\S+)\s*$/u.exec(line)
+    if (id !== null) {
+      current = id[2]
+      rows.set(current, [])
+      configIndent = null
+      continue
+    }
+    if (current === null) continue
+    const configLine = /^(\s*)config:\s*$/u.exec(line)
+    if (configLine !== null) {
+      configIndent = configLine[1].length
+      continue
+    }
+    if (configIndent === null) continue
+    const key = /^(\s+)([A-Za-z_][\w]*):/u.exec(line)
+    if (key === null || key[1].length <= configIndent) {
+      configIndent = null
+      continue
+    }
+    rows.get(current).push(key[2])
+  }
+  for (const [id, keys] of rows) rows.set(id, [...keys].sort())
+  return rows
+}
+
+/** Render a row map for diagnostics. */
+function describeRows(rows) {
+  if (rows.size === 0) return '(none found)'
+  return [...rows].map(([id, keys]) => `${id}{${keys.join(',')}}`).join(' ')
 }
 
 let failed = false
@@ -269,17 +306,17 @@ for (const [upstreamPath, portedPath] of PATCH_ID_PAIRS) {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
   })
-  const upstreamIds = patchRowIds(upstream)
-  const portedIds = patchRowIds(readFileSync(join(ROOT, portedPath), 'utf8'))
-  if (upstreamIds.length > 0 && upstreamIds.join(',') === portedIds.join(',')) {
-    process.stdout.write(`ok    ${portedPath} (row ids match: ${upstreamIds.join(', ')})\n`)
+  const upstreamRows = patchRows(upstream)
+  const portedRows = patchRows(readFileSync(join(ROOT, portedPath), 'utf8'))
+  if (upstreamRows.size > 0 && describeRows(upstreamRows) === describeRows(portedRows)) {
+    process.stdout.write(`ok    ${portedPath} (rows and config keys match: ${describeRows(upstreamRows)})\n`)
     continue
   }
   failed = true
   process.stdout.write(
-    `DRIFT ${portedPath}: row ids diverge from ${upstreamPath}\n`
-    + `  upstream: ${upstreamIds.join(', ') || '(none found)'}\n`
-    + `  local:    ${portedIds.join(', ') || '(none found)'}\n`,
+    `DRIFT ${portedPath}: inserted rows diverge from ${upstreamPath}\n`
+    + `  upstream: ${describeRows(upstreamRows)}\n`
+    + `  local:    ${describeRows(portedRows)}\n`,
   )
 }
 
@@ -287,4 +324,4 @@ if (failed) {
   process.stdout.write(`\nbehavioural drift against ${REF} in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, and ${String(PATCH_ID_PAIRS.length)} patch row-id set\n`)
+process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, and ${String(PATCH_ID_PAIRS.length)} patch row set\n`)
