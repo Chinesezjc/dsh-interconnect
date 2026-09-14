@@ -2,6 +2,20 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.2（2026-09-14）
+
+跟随 #3243 分支 head 的最新状态同步（该分支本轮又推进了重建 commit）。
+
+### 变更
+
+- **删除 `ListRequest` 导出**：该类型在仓库内无任何消费者（服务的 `list(instanceId: string)` 收字符串，工具直接传 `args.instanceId`），上游按「Require a current owner and need」删除，独立仓库跟随以保持两侧类型面一致。这是导出面收缩，无已知消费者。
+- `interconnect_reply` 的工具描述改为与上游一致的措辞（`the sending instance id and session id`）。
+
+### 验证
+
+- `pnpm run check`（typecheck + 154/154 tests + build）全绿。
+- 与 #3243 head（`176ea91f6b`）逐文件对照：四个源文件的实质差异只剩镜像谓词与内部路径适配。
+
 ## 0.11.1（2026-09-14）
 
 补齐 0.11.0 遗漏的 review 收尾加固。0.11.0 只回移到 #3243 分支 08-30 的状态，漏了 09-10 的收尾提交；本版以分支最新 head（`f6fdeaf7de`）重新对齐。

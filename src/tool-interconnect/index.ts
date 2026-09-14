@@ -277,7 +277,7 @@ export function apply(ctx: Context): void {
     name: 'interconnect_reply',
     description: 'Deliver one text message back to the peer that this session last received an '
       + 'interconnect message from. Only the reply text is needed: the replying session is this '
-      + 'agent\'s own, and the outbound target (the peer origin and its session id) is recalled '
+      + 'agent\'s own, and the outbound target (the sending instance id and session id) is recalled '
       + 'from the message this session received, so you do not ask for an address twice. A session '
       + 'that never received a message through interconnect — or received one without a sender '
       + 'identity — reports reason "no-sender-known".',

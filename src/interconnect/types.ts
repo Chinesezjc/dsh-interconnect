@@ -146,12 +146,6 @@ export interface ListResult {
   readonly instance: string
 }
 
-/** Outbound listing request: which peer instance to list. */
-export interface ListRequest {
-  /** Peers' `instanceId` as configured under {@link Config.peers}. */
-  readonly instanceId: string
-}
-
 /** Outbound delivery request: which peer instance plus a `send` business payload. */
 export interface SendRequest {
   /**
