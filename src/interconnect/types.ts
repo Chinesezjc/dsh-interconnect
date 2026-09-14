@@ -93,24 +93,35 @@ export interface SendPayload {
  */
 export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent' | 'no-sender-known'
 
-/** Business result of a `send` endpoint call. */
-export interface SendResult {
-  /** True when the target session is live on the receiving instance and the message was delivered. */
-  readonly delivered: boolean
-  /** Echoed receiver instance id (diagnostic; never trusted for routing). */
-  readonly instance: string
-  /**
-   * The mode actually used, so a sender can tell whether its requested override
-   * took effect. Absent when nothing was delivered.
-   */
-  readonly delivery?: DeliveryMode
-  /**
-   * Why delivery failed. Present exactly when `delivered` is false, so a caller
-   * can distinguish "wrong target" from "receiver unreachable" instead of
-   * guessing from a bare boolean.
-   */
-  readonly reason?: SendFailure
-}
+/**
+ * Business result of a `send` endpoint call: either the target session was
+ * reached, with the mode actually used, or it was not, with the reason. The
+ * `delivered` discriminant is the same one the wire result schema carries, so a
+ * failure never also reports a delivery mode.
+ */
+export type SendResult =
+  | {
+    /** True when the target session is live on the receiving instance and the message was delivered. */
+    readonly delivered: true
+    /** Echoed receiver instance id (diagnostic; never trusted for routing). */
+    readonly instance: string
+    /**
+       * The mode actually used, so a sender can tell whether its requested override
+       * took effect.
+       */
+    readonly delivery?: DeliveryMode
+  }
+  | {
+    /** False when the target session was not reached. */
+    readonly delivered: false
+    /** Echoed receiver instance id (diagnostic; never trusted for routing). */
+    readonly instance: string
+    /**
+       * Why delivery failed, so a caller can distinguish "wrong target" from
+       * "receiver unreachable" instead of guessing from a bare boolean.
+       */
+    readonly reason: SendFailure
+  }
 
 /** Business result of a `ping` endpoint call. */
 export interface PingResult {
@@ -138,9 +149,12 @@ export interface InterconnectSessionSummary {
   readonly status?: string
 }
 
-/** Business result of a `list` endpoint call. */
+/** Business result of a `list` call. */
 export interface ListResult {
-  /** Live sessions in registration order. */
+  /**
+   * Live sessions in registration order, capped at the 100-row limit one
+   * answer may carry so the frame stays inside the link's size bound.
+   */
   readonly sessions: readonly InterconnectSessionSummary[]
   /** Echoed receiver instance id (diagnostic; never trusted for routing). */
   readonly instance: string

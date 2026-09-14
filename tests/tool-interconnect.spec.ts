@@ -5,7 +5,7 @@ import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as toolInterconnect from '../src/tool-interconnect/index.ts'
-import type { InterconnectService } from '../src/interconnect/index.ts'
+import type { InterconnectService, SendResult } from '../src/interconnect/index.ts'
 
 /** Minimal fake interconnect service recording calls and returning fixed results. */
 function fakeInterconnect(overrides: Partial<InterconnectService> = {}): InterconnectService {
@@ -174,7 +174,7 @@ describe('tool-interconnect', () => {
 
   it('forwards an explicit delivery mode to the service and reports it back', async () => {
     const interconnect = fakeInterconnect({
-      send: vi.fn(async () => ({ delivered: true, instance: 'peer', delivery: 'steer' as const })),
+      send: vi.fn(async (): Promise<SendResult> => ({ delivered: true, instance: 'peer', delivery: 'steer' })),
     })
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
@@ -301,7 +301,7 @@ describe('tool-interconnect', () => {
 
   it('forwards an explicit delivery mode on a reply and reports it back', async () => {
     const interconnect = fakeInterconnect({
-      reply: vi.fn(async () => ({ delivered: true, instance: 'peer', delivery: 'inject' as const })),
+      reply: vi.fn(async (): Promise<SendResult> => ({ delivered: true, instance: 'peer', delivery: 'inject' })),
     })
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_reply')!

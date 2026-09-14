@@ -118,7 +118,7 @@ const LINK_CHANNEL = '/interconnect/link'
  */
 const MAX_LISTED_SESSIONS = 100
 
-/** Wire union for the discriminated EventNotification fact (shared by HTTP and WS). */
+/** Wire union for the discriminated EventNotification fact carried by an `event` frame. */
 const notificationSchema = z.union([
   z.object({ kind: z.const('agent/created').required(), sessionId: z.string().required() }),
   z.object({ kind: z.const('agent/disposed').required(), sessionId: z.string().required() }),
@@ -156,6 +156,40 @@ const listResultSchema = z.object({
     status: z.string().required(false),
   })).required(),
 })
+
+/**
+ * Drop the explicit `null` values of one decoded frame. Schemastery accepts
+ * `null` for a field that is not required and keeps it in the parsed result,
+ * while every declared field on these frames is present-or-absent only: a peer
+ * whose JSON writer emits `null` for a value it has none of would otherwise
+ * hand a `null` title, status, or delivery to the tool output schemas, which
+ * accept the field's own type and reject the whole result.
+ * @param value - decoded frame, or any nested value of one.
+ * @returns the value with every `null`-valued object key removed.
+ */
+const withoutNullFields = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(item => withoutNullFields(item))
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, field]) => field !== null)
+    .map(([key, field]) => [key, withoutNullFields(field)]))
+}
+
+/**
+ * Project one decoded `msg-result` payload onto the fields its discriminant
+ * branch declares. Schemastery's union keeps the keys of every branch it
+ * considered, so a failing answer still carries the `delivery` a peer sent
+ * beside it and a successful one carries a stray `reason` or an unknown key;
+ * the tool output schemas accept only the branch's own string fields, so
+ * nothing else may leave this service. `delivered` selects the branch and the
+ * schema has already validated the fields that branch declares.
+ * @param result - decoded `msg-result` payload.
+ * @returns the payload restricted to its branch's fields.
+ */
+const projectMsgResult = (result: SendResult): SendResult =>
+  result.delivered
+    ? { delivered: true, instance: result.instance, ...(result.delivery === undefined ? {} : { delivery: result.delivery }) }
+    : { delivered: false, instance: result.instance, reason: result.reason }
 
 /**
  * Whether one decoded `query-result` payload satisfies the schema for the
@@ -626,7 +660,7 @@ export class InterconnectService extends Service {
     const state = new LinkState(
       (socket) => { this.attachSocket(socket) },
       this.ctx.logger,
-      () => this.resolveTokenForDial(),
+      () => this.resolveToken(),
       instanceId,
       trimBase(origin),
     )
@@ -883,10 +917,6 @@ export class InterconnectService extends Service {
     return credential === undefined || credential.value.length === 0 ? undefined : credential.value
   }
 
-  private resolveTokenForDial(): Promise<string | undefined> {
-    return this.resolveToken()
-  }
-
   /** Inbound WebSocket upgrade: authenticate the bearer header, then accept. */
   private async handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     let token: string | undefined
@@ -981,7 +1011,7 @@ export class InterconnectService extends Service {
           : Buffer.from(data).toString('utf8')
     let parsed: unknown
     try {
-      parsed = z.resolve(JSON.parse(text), linkFrameSchema, {})[0]
+      parsed = withoutNullFields(z.resolve(JSON.parse(text), linkFrameSchema, {})[0])
     } catch {
       this.ctx.logger.warn('interconnect: dropping malformed link frame')
       return
@@ -1022,7 +1052,7 @@ export class InterconnectService extends Service {
       // result shape is already enforced by the frame schema; msg requests
       // carry no per-kind accept gate.
       if (pending !== undefined && pending.kind === 'msg') {
-        ;pending.resolve?.(frame.result)
+        ;pending.resolve?.(projectMsgResult(frame.result))
       }
       return
     }
@@ -1066,9 +1096,9 @@ export class InterconnectService extends Service {
 }
 
 /**
- * One in-flight `msg` delivered over a peer link, awaiting its `msg-result`.
- * `resolve`/`reject` are installed by `emitViaLink` after the promise is
- * created; `handleFrame` settles the matching entry on a `msg-result`.
+ * One in-flight request awaiting its `*-result` frame. `waitForResult`
+ * installs the timer and settle callbacks; `handleFrame` settles the matching
+ * entry when the result arrives.
  */
 interface PendingMessage {
   readonly timer: ReturnType<typeof setTimeout>

@@ -2,6 +2,20 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.3（2026-09-14）
+
+跟随 #3243 分支 head 的又一批改动（重建 commit `56bac7eabe`）。
+
+### 变更
+
+- **`SendResult` 改为判别联合**：`delivered: true` 分支带可选 `delivery`，`delivered: false` 分支必须带 `reason`。此前是可选字段的 interface，类型层面无法阻止「失败却无原因」的组合。
+- **入站帧投影**：`handleFrame` 解析后先过滤 null 字段（`withoutNullFields`），并把 `msg-result` 的 `SendResult` 规范化成上述判别联合（`projectMsgResult`），使异版本对端送来的字段组合不会落到错误分支。
+
+### 验证
+
+- `pnpm run check`（typecheck + 156/156 tests + build）全绿。
+- 与 head `56bac7eabe` 逐文件对照：四个源文件的 monorepo 独有实质差异为 0。
+
 ## 0.11.2（2026-09-14）
 
 跟随 #3243 分支 head 的最新状态同步（该分支本轮又推进了重建 commit）。

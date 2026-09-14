@@ -339,8 +339,7 @@ describe('interconnect over real WS links', () => {
       sessionId: 'X-sess',
       text: 'hello',
     })
-    expect(result.delivered).toBe(false)
-    expect(result.reason).toBe('unreachable')
+    expect(result).toMatchObject({ delivered: false, reason: 'unreachable' })
     await sender.dispose()
   })
 
@@ -422,8 +421,7 @@ describe('interconnect over real WS links', () => {
   it('reports no-sender-known for a reply addressed to a session that recorded none', async () => {
     const receiver = await mounted('secret', new Set(['idle-sess']))
     const result = await receiver.ctx.interconnect.reply({ sessionId: 'idle-sess', text: 'who?' })
-    expect(result.delivered).toBe(false)
-    expect(result.reason).toBe('no-sender-known')
+    expect(result).toMatchObject({ delivered: false, reason: 'no-sender-known' })
     await receiver.dispose()
   })
 })
@@ -1770,8 +1768,7 @@ describe('interconnect dial and teardown edge paths', () => {
       await new Promise<void>((resolve) => { wss.close(() => { resolve() }) })
       await wait(1300) // the 1s backoff retry fires once against the dead origin
       const result = await sender.ctx.interconnect.send({ instanceId: 'peer-b', sessionId: 'R-sess', text: 'x' })
-      expect(result.delivered).toBe(false)
-      expect(result.reason).toBe('unreachable')
+      expect(result).toMatchObject({ delivered: false, reason: 'unreachable' })
     } finally {
       await sender.dispose() // close() observes a pending reconnect timer
     }
@@ -2133,6 +2130,91 @@ describe('interconnect result frame typing', () => {
       await wait(250)
       const result = await sender.ctx.interconnect.list('mis-typing-peer')
       expect(result).toBeUndefined()
+    } finally {
+      await sender.dispose()
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => { if (error === undefined) resolve(); else reject(error) })
+      })
+    }
+  })
+})
+
+describe('interconnect explicit null wire fields', () => {
+  it('reads a null optional field as absent', async () => {
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((resolve) => { wss.once('listening', resolve) })
+    const address = wss.address() as AddressInfo
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        const frame = JSON.parse(text) as { type: string; reqId: string }
+        // A peer written against JSON's absent-value convention sends `null`
+        // for a field it has no value for instead of omitting the key.
+        if (frame.type === 'msg') {
+          socket.send(JSON.stringify({
+            type: 'msg-result',
+            reqId: frame.reqId,
+            result: { delivered: true, instance: 'null-peer', delivery: null },
+          }))
+        } else if (frame.type === 'query') {
+          socket.send(JSON.stringify({
+            type: 'query-result',
+            reqId: frame.reqId,
+            result: { instance: 'null-peer', sessions: [{ sessionId: 'peer-sess', title: null, status: null }] },
+          }))
+        }
+      })
+    })
+    const sender = await mounted('secret', new Set([]), { 'null-peer': `http://127.0.0.1:${String(address.port)}` })
+    try {
+      await wait(250) // link opens before either request goes out
+      expect(await sender.ctx.interconnect.send({ instanceId: 'null-peer', sessionId: 'peer-sess', text: 'hi' }))
+        .toEqual({ delivered: true, instance: 'null-peer' })
+      expect(await sender.ctx.interconnect.list('null-peer'))
+        .toEqual({ instance: 'null-peer', sessions: [{ sessionId: 'peer-sess' }] })
+    } finally {
+      await sender.dispose()
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => { if (error === undefined) resolve(); else reject(error) })
+      })
+    }
+  })
+
+  it('drops the fields an answer branch does not declare', async () => {
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((resolve) => { wss.once('listening', resolve) })
+    const address = wss.address() as AddressInfo
+    let answered = 0
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        const frame = JSON.parse(text) as { type: string; reqId: string }
+        if (frame.type !== 'msg') return
+        answered += 1
+        // The failure branch keeps whatever the success branch's `delivery`
+        // field carried, and the success branch keeps a stray `reason` or an
+        // unknown key, because the union merges every branch's keys.
+        const result = answered === 1
+          ? { delivered: false, instance: 'stray-peer', reason: 'unreachable', delivery: 'steer', junk: 1 }
+          : { delivered: true, instance: 'stray-peer', reason: 123, junk: 1 }
+        socket.send(JSON.stringify({ type: 'msg-result', reqId: frame.reqId, result }))
+      })
+    })
+    const sender = await mounted('secret', new Set([]), { 'stray-peer': `http://127.0.0.1:${String(address.port)}` })
+    try {
+      await wait(250) // link opens before either request goes out
+      expect(await sender.ctx.interconnect.send({ instanceId: 'stray-peer', sessionId: 'peer-sess', text: 'first' }))
+        .toEqual({ delivered: false, instance: 'stray-peer', reason: 'unreachable' })
+      expect(await sender.ctx.interconnect.send({ instanceId: 'stray-peer', sessionId: 'peer-sess', text: 'second' }))
+        .toEqual({ delivered: true, instance: 'stray-peer' })
     } finally {
       await sender.dispose()
       await new Promise<void>((resolve, reject) => {
