@@ -1,7 +1,7 @@
 {
   "name": "dsh-interconnect",
   "description": "Cross-instance message/event handoff for DeepSeek Harness (DSH): WebSocket link, model-facing tools, and companion skill.",
-  "version": "0.11.5",
+  "version": "0.11.6",
   "entry": {
     "name": "dsh-interconnect/interconnect",
     "inject": ["agents", "credentials"]

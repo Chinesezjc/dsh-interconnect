@@ -1349,6 +1349,89 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     }
   })
 
+  it('bounds a list answer by the serialized bytes of its rows', async () => {
+    const long = 'x'.repeat(20_000)
+    const liveIds = Array.from({ length: 100 }, (_unused, index) => `session-${String(index)}`)
+    const receiver = await mounted('secret', new Set(liveIds), {}, 'followup', true, 'test-instance', {
+      provides: {
+        sessionProjections: {
+          snapshot: (session: { id: string }) => ({ values: { title: `${session.id}:${long}` } }),
+        },
+      },
+    })
+    try {
+      const answers = await queryList(receiver.service)
+      expect(Buffer.byteLength(JSON.stringify(answers[0]), 'utf8')).toBeLessThan(1024 * 1024)
+      const rows = (answers[0]?.result as { sessions: { sessionId: string; title?: string }[] }).sessions
+      // A title that does not fit is dropped before its row is, so the listing
+      // stays a prefix of the live order and never exceeds the frame cap.
+      expect(rows.length).toBeGreaterThan(0)
+      expect(rows.length).toBeLessThanOrEqual(100)
+      expect(rows.map(row => row.sessionId)).toEqual(liveIds.slice(0, rows.length))
+      expect(rows.some(row => row.title === undefined)).toBe(true)
+    } finally {
+      await receiver.dispose()
+    }
+  })
+
+  it('counts a multibyte title by its serialized bytes', async () => {
+    // 200k code points, 600 KB once serialized as UTF-8.
+    const long = '解'.repeat(200_000)
+    const receiver = await mounted('secret', new Set(['cjk-1', 'cjk-2', 'cjk-3']), {}, 'followup', true, 'test-instance', {
+      provides: {
+        sessionProjections: {
+          snapshot: (session: { id: string }) => ({ values: { title: `${session.id}:${long}` } }),
+        },
+      },
+    })
+    try {
+      const answers = await queryList(receiver.service)
+      expect(Buffer.byteLength(JSON.stringify(answers[0]), 'utf8')).toBeLessThan(1024 * 1024)
+      const rows = (answers[0]?.result as { sessions: { title?: string }[] }).sessions
+      // One 600 KB title fits; a character-count budget would have admitted all
+      // three into a frame the peer's maxPayload closes the link over.
+      expect(rows).toHaveLength(3)
+      expect(rows[0]?.title).toBeDefined()
+      expect(rows.slice(1).every(row => row.title === undefined)).toBe(true)
+    } finally {
+      await receiver.dispose()
+    }
+  })
+
+  it('drops a title that does not fit from a row without a status', async () => {
+    const long = 'x'.repeat(20_000)
+    const liveIds = Array.from({ length: 100 }, (_unused, index) => `nostatus-${String(index)}`)
+    const agents = fakeAgents(new Map(), new Set(liveIds), undefined, undefined, { noStatus: true })
+    const receiver = await mounted('secret', new Set(liveIds), {}, 'followup', true, 'test-instance', {
+      agents,
+      provides: {
+        sessionProjections: {
+          snapshot: (session: { id: string }) => ({ values: { title: `${session.id}:${long}` } }),
+        },
+      },
+    })
+    try {
+      const answers = await queryList(receiver.service)
+      expect(Buffer.byteLength(JSON.stringify(answers[0]), 'utf8')).toBeLessThan(1024 * 1024)
+      const rows = (answers[0]?.result as { sessions: { title?: string; status?: string }[] }).sessions
+      expect(rows.length).toBeGreaterThan(0)
+      expect(rows.some(row => row.title === undefined)).toBe(true)
+      expect(rows.every(row => row.status === undefined)).toBe(true)
+    } finally {
+      await receiver.dispose()
+    }
+  })
+
+  it('ends the listing when a row does not fit even without its title', async () => {
+    const receiver = await mounted('secret', new Set([`huge-${'x'.repeat(1_100_000)}`]))
+    try {
+      const answers = await queryList(receiver.service)
+      expect(answers[0]?.result).toEqual({ instance: 'test-instance', sessions: [] })
+    } finally {
+      await receiver.dispose()
+    }
+  })
+
   it('drops an event frame whose notification is missing or null', async () => {
     const receiver = await mounted('secret', new Set([]))
     const { socket, handlers } = fakeSocket()

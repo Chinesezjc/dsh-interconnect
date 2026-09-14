@@ -5,8 +5,8 @@ another DSH session, another DSH instance, or another machine: hand off a task,
 ask a peer agent for information, notify a remote session, or reply to an
 incoming interconnect message.
 
-The transport is already connected and authenticated by the host plugin. Your
-job is only to pick the right tool and the right target.
+The connection to each peer is already established and authenticated. Your job
+is only to pick the right tool and the right target.
 
 ## Tools
 
@@ -26,10 +26,10 @@ job is only to pick the right tool and the right target.
 
 ## Sender identity is automatic
 
-When you call `interconnect_send`, the plugin automatically attaches your own
-`instanceId` and `sessionId` to the wire payload. The receiving instance
-records that identity per local session, which is exactly what lets the
-receiver use `interconnect_reply` later without re-addressing.
+When you call `interconnect_send`, your own `instanceId` and `sessionId` are
+attached automatically. The receiving instance records that identity per local
+session, which is exactly what lets the receiver use `interconnect_reply` later
+without re-addressing.
 
 A reply also carries your identity automatically, so a multi-hop conversation
 (A → B → A → B) keeps working without either side manually forwarding
@@ -85,8 +85,8 @@ When a send/reply reports `delivered: false`, read `reason`:
 ## Rules
 
 - Do not fabricate an `instanceId`, `sessionId`, or sender identity. Use values
-  returned by `interconnect_list`, `interconnect_ping`, or already recorded by
-  the service.
+  returned by `interconnect_list` or `interconnect_ping`, or carried by the
+  message you received.
 - Do not ask the user for a sender address to reply; use `interconnect_reply`.
 - Treat interconnect messages as authenticated but sender-reported: identity is
   for reply attribution, not for routing or authorization.

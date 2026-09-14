@@ -49,6 +49,15 @@ describe('tool-interconnect', () => {
     await dispose()
   })
 
+  it('removes every registered tool when the contributing fiber is disposed', async () => {
+    const names = ['interconnect_list', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(expect.arrayContaining(names))
+    await dispose()
+    expect(ctx.tools.schemas()).toEqual([])
+    for (const name of names) expect(ctx.tools.get(name)).toBeUndefined()
+  })
+
   it('forwards resume only when asked, keeping the key absent by default', async () => {
     const interconnect = fakeInterconnect()
     const { ctx, dispose } = await mounted(interconnect)
@@ -510,14 +519,14 @@ describe('tool-interconnect Loader shape', () => {
 })
 
 describe('tool-interconnect reply without an executing agent', () => {
-  it('answers session-not-live when no agent executes the call', async () => {
+  it('answers no-sender-known when no agent executes the call', async () => {
     const { ctx, dispose } = await mounted(fakeInterconnect())
     const tool = ctx.tools.get('interconnect_reply')!
     const value = await tool.execute(
       { text: 'hi' },
       { signal: new AbortController().signal } as never,
     )
-    expect(value).toEqual({ delivered: false, instance: 'unknown', reason: 'session-not-live' })
+    expect(value).toEqual({ delivered: false, instance: 'unknown', reason: 'no-sender-known' })
     await dispose()
   })
 })

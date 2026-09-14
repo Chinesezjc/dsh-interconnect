@@ -332,7 +332,10 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       if (exec.agent === undefined) {
-        return { delivered: false, instance: 'unknown', reason: 'session-not-live' }
+        // No executing session means no recorded sender to reply to; the
+        // closer existing reason states that, and its render text names the
+        // missing sender identity instead of a dead remote session.
+        return { delivered: false, instance: 'unknown', reason: 'no-sender-known' }
       }
       const result = await raceSignal(exec.signal, interconnect.reply({
         // The replying session is this executing agent's own session, never a

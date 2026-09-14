@@ -111,12 +111,28 @@ const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
 /** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
 /**
- * Maximum session rows one `list` answer carries. The whole answer must stay
- * inside {@link MAX_LINK_FRAME_BYTES}, and ws closes a link that receives an
- * over-cap frame — so a peer with a very large live set answers the first rows
- * instead of breaking the transport.
+ * Bytes reserved inside {@link MAX_LINK_FRAME_BYTES} for one `query-result`
+ * frame's envelope: its type, `reqId`, instance id, and JSON syntax.
+ */
+const LIST_FRAME_ENVELOPE_BYTES = 4096
+/**
+ * Bytes one `list` answer may spend on its `sessions` rows. The answer has to
+ * stay inside {@link MAX_LINK_FRAME_BYTES} because ws closes a link that
+ * receives an over-cap frame, and the sender then reads the call as
+ * unreachable. A row's title comes from the session-title projection, whose
+ * configured length bound is independent of this frame, so the row count alone
+ * cannot bound the answer.
+ */
+const MAX_LIST_ROWS_BYTES = MAX_LINK_FRAME_BYTES - LIST_FRAME_ENVELOPE_BYTES
+/**
+ * Maximum session rows one `list` answer carries, so a very large live set
+ * still answers with a bounded number of targets.
  */
 const MAX_LISTED_SESSIONS = 100
+
+/** Serialized size of one row inside a frame's `sessions` array: UTF-8 bytes plus its separating comma. */
+const rowBytes = (row: InterconnectSessionSummary): number =>
+  Buffer.byteLength(JSON.stringify(row), 'utf8') + 1
 
 /** Wire union for the discriminated EventNotification fact carried by an `event` frame. */
 const notificationSchema = z.union([
@@ -793,23 +809,48 @@ export class InterconnectService extends Service {
     // contradicts `send`.
     const reachable = this.ctx.agents.list()
       .filter(agent => !isSessionOwnedBySubagent(this.ctx, agent.session, agent))
-    const sessions = reachable.slice(0, MAX_LISTED_SESSIONS).map((agent): InterconnectSessionSummary => {
-      let title: string | undefined
-      try {
-        const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
-        const value = snapshot?.values.title
-        if (typeof value === 'string' && value !== '') title = value
-      } catch {
-        // A failing projection must not hide a reachable session.
-        title = undefined
+    const sessions: InterconnectSessionSummary[] = []
+    let used = 0
+    for (const agent of reachable.slice(0, MAX_LISTED_SESSIONS)) {
+      const row = this.sessionRow(agent)
+      const sized = used + rowBytes(row)
+      if (sized > MAX_LIST_ROWS_BYTES) {
+        // A title is best-effort: a row whose title does not fit keeps its
+        // target and drops the title before it drops out of the listing.
+        const untitled = {
+          sessionId: row.sessionId,
+          ...(row.status === undefined ? {} : { status: row.status }),
+        }
+        const untitledSized = used + rowBytes(untitled)
+        // A row that does not fit even untitled ends the listing: adding a
+        // shorter later row would report the set out of order.
+        if (untitledSized > MAX_LIST_ROWS_BYTES) break
+        sessions.push(untitled)
+        used = untitledSized
+        continue
       }
-      return {
-        sessionId: agent.id,
-        ...(title === undefined ? {} : { title }),
-        ...(typeof agent.status === 'string' ? { status: agent.status } : {}),
-      }
-    })
+      sessions.push(row)
+      used = sized
+    }
     return { sessions, instance: this.instanceId }
+  }
+
+  /** One listing row for a live agent; the title projection is best-effort. */
+  private sessionRow(agent: Agent): InterconnectSessionSummary {
+    let title: string | undefined
+    try {
+      const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
+      const value = snapshot?.values.title
+      if (typeof value === 'string' && value !== '') title = value
+    } catch {
+      // A failing projection must not hide a reachable session.
+      title = undefined
+    }
+    return {
+      sessionId: agent.id,
+      ...(title === undefined ? {} : { title }),
+      ...(typeof agent.status === 'string' ? { status: agent.status } : {}),
+    }
   }
 
   /**

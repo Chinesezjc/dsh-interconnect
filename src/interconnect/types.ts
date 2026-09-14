@@ -289,7 +289,8 @@ export interface Config {
    * instance's own link. An origin is the ONLY routing authority — `instanceId`
    * is never used to derive an address.
    *
-   * Fan-out of local lifecycle events also goes to every peer in this map.
+   * Fan-out of local lifecycle events goes to every live link, including an
+   * inbound peer that is not in this map.
    * A runtime `subscribe(instanceId, origin)` can extend the map without
    * restart; retuning the origin of an existing peer re-routes it.
    */
