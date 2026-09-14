@@ -213,6 +213,22 @@ function compare(upstreamText, portedText) {
   return { missing, extra }
 }
 
+/**
+ * The retirement plan repoints a deployment profile at the monorepo's
+ * `interconnect-profile` layer while keeping that profile's own override rows,
+ * which keeps working only while both patches insert the same row ids. The
+ * `name` values differ by design (this package's subpaths versus the scoped
+ * packages), so only the ids are compared.
+ */
+const PATCH_ID_PAIRS = [
+  ['packages/experimental/interconnect-profile/cordis.patch.yml', 'cordis.patch.yml'],
+]
+
+/** Row ids a cordis patch inserts, in file order. */
+function patchRowIds(text) {
+  return [...text.matchAll(/^\s*-\s*id:\s*(\S+)\s*$/gmu)].map(match => match[1])
+}
+
 let failed = false
 for (const [upstreamPath, portedPath] of PAIRS) {
   const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
@@ -248,8 +264,27 @@ for (const [upstreamPath, portedPath] of EXACT_PAIRS) {
   )
 }
 
+for (const [upstreamPath, portedPath] of PATCH_ID_PAIRS) {
+  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const upstreamIds = patchRowIds(upstream)
+  const portedIds = patchRowIds(readFileSync(join(ROOT, portedPath), 'utf8'))
+  if (upstreamIds.length > 0 && upstreamIds.join(',') === portedIds.join(',')) {
+    process.stdout.write(`ok    ${portedPath} (row ids match: ${upstreamIds.join(', ')})\n`)
+    continue
+  }
+  failed = true
+  process.stdout.write(
+    `DRIFT ${portedPath}: row ids diverge from ${upstreamPath}\n`
+    + `  upstream: ${upstreamIds.join(', ') || '(none found)'}\n`
+    + `  local:    ${portedIds.join(', ') || '(none found)'}\n`,
+  )
+}
+
 if (failed) {
   process.stdout.write(`\nbehavioural drift against ${REF} in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files and ${String(EXACT_PAIRS.length)} byte-exact asset\n`)
+process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, and ${String(PATCH_ID_PAIRS.length)} patch row-id set\n`)
