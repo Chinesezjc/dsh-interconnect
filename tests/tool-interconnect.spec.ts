@@ -176,6 +176,7 @@ describe('tool-interconnect', () => {
     const rendered = tool.output.render({ instanceId: 'peer', sessionId: 'sess-1', text: 'hi' }, value as never)
     const text = (rendered as { type: 'text'; text: string }[])[0]!.text
     expect(text).toContain('did not answer')
+    expect(text).toContain('retrying may succeed')
     // The old single-line render claimed "no live session" for this case too.
     expect(text).not.toContain('no live session')
     await dispose()

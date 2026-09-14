@@ -13,7 +13,6 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-// Activates the `Context.interconnect` merge declared by the interconnect service plugin.
 // The row bound comes from the service that answers `interconnect_list`; the import also
 // activates the `Context.interconnect` merge that service declares.
 import { MAX_LISTED_SESSIONS } from '../interconnect/index.ts'
@@ -80,7 +79,7 @@ export function apply(ctx: Context): void {
     description: 'Deliver one text message to a live session on another DSH instance (same machine, '
       + 'another machine, or another session). '
       + 'Returns whether the peer instance received it and which instance answered. '
-      + 'Only a session with a running agent receives directly; a persisted one can be woken by '
+      + 'Only a live session receives directly; a persisted one can be woken by '
       + 'setting resume, and when delivery fails the result reports the reason (for example '
       + '"session-not-live") and interconnect_list shows which sessions are live there. '
       + 'The sending instance and session ids are attached automatically, so the receiver can reply '
@@ -113,7 +112,7 @@ export function apply(ctx: Context): void {
       },
       resume: {
         type: 'boolean',
-        description: 'Wake the target session if it is persisted but has no running agent. Off by '
+        description: 'Wake the target session if it is persisted but not live. Off by '
           + 'default because delivery to a woken session starts a real agent turn — a billed model call '
           + 'with that session\'s full toolset — in a conversation nobody is watching. Prefer '
           + 'interconnect_list and an already-live target; set this only when that specific session must '
@@ -135,7 +134,7 @@ export function apply(ctx: Context): void {
         const text = ((): string => {
           switch (value.reason) {
             case 'unreachable':
-              return `not delivered: ${value.instance} did not answer (unreachable)`
+              return `not delivered: ${value.instance} did not answer (unreachable); retrying may succeed`
             case 'resume-refused':
               return `not delivered: ${value.instance} does not allow waking persisted sessions`
             case 'resume-failed':
@@ -304,7 +303,7 @@ export function apply(ctx: Context): void {
       },
       resume: {
         type: 'boolean',
-        description: 'Wake the target session if it is persisted but has no running agent, as in '
+        description: 'Wake the target session if it is persisted but not live, as in '
           + 'interconnect_send. Off by default; the receiver may refuse.',
       },
     },
@@ -325,7 +324,7 @@ export function apply(ctx: Context): void {
             return 'not delivered: the recorded sender\'s session belongs to a subagent and its parent agent owns delivery'
           }
           if (value.reason === 'unreachable') {
-            return 'not delivered: the recorded sender did not answer (unreachable)'
+            return 'not delivered: the recorded sender did not answer (unreachable); retrying may succeed'
           }
           if (value.reason === 'resume-refused') {
             return 'not delivered: the recorded sender does not allow waking persisted sessions'

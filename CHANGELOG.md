@@ -2,6 +2,23 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.11（2026-09-15）
+
+跟随 #3243 分支新 head（`c4ddb1dd7f`）：修 review 指出的文档/文案不一致，并给 `unreachable` 的渲染补回重试提示。
+
+### 变更
+
+- **导入注释去重**：`tool-interconnect` 里旧的一行「Activates the `Context.interconnect` merge …」与新增的两行注释说同一件事，删掉旧行（review 指出上一轮是"追加"而非"替换"）。
+- **口径统一为 live session**：send 描述 `Only a session with a running agent receives directly` → `Only a live session receives directly`；两处 `resume` 说明 `persisted but has no running agent` → `persisted but not live`。依据是 `ctx.agents.list()` 含可被 followup/steer 唤醒的 idle live agent，而 `resume` 针对的是**没有 live agent** 的持久化 session。
+- **`unreachable` 渲染补回重试提示**：send 与 reply 两处 render 由 `… did not answer (unreachable)` 改为 `… did not answer (unreachable); retrying may succeed`。review 指出「README 声称重试可能有用，而 render 现在只报事实」的不一致；上游选择把提示补进 render（而非从 README 删除），本版跟随；spec 新增对应断言。
+- `interconnect/types.ts` 的 `resume` 文档未改（上游亦未改）。
+
+### 验证
+
+- `pnpm run check`（typecheck + 168/168 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against c4ddb1dd7f across 7 ported files and 1 byte-exact asset`。
+- 负例验证：把 send 路径的 render 退回不含 `; retrying may succeed` 的版本 → 新增断言变红；还原后通过。
+
 ## 0.11.10（2026-09-15）
 
 跟随 #3243 分支新 head（`3f13d1c4b4`）：移植 `interconnect/event` 的异步 listener 修复与去鉴权词汇的文案，并修掉发布流程漏 bump 清单的缺陷。
