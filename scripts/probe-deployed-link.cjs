@@ -11,6 +11,13 @@ ws.on('open', () => {
   ws.send(JSON.stringify({ type: 'hello', sender: 'probe' }))
   ws.send(JSON.stringify({ type: 'query', reqId: 'q1', query: { kind: 'ping' } }))
   ws.send(JSON.stringify({ type: 'query', reqId: 'q2', query: { kind: 'list' } }))
+  // The event query is the path that dispatches to local listeners; since 0.11.10
+  // it goes through `ctx.parallel`, so a peer still gets its ack.
+  ws.send(JSON.stringify({
+    type: 'query',
+    reqId: 'q3',
+    query: { kind: 'event', notification: { kind: 'agent/created', sessionId: 'probe-session' } },
+  }))
 })
 ws.on('message', (data) => {
   let frame
@@ -26,10 +33,12 @@ ws.on('message', (data) => {
     for (const row of result.sessions.slice(0, 3)) {
       console.log(`  row: ${String(row.sessionId)} | title=${String(row.title ?? '-')} | status=${String(row.status ?? '-')}`)
     }
+  } else if (result.accepted !== undefined) {
+    console.log(`event: accepted=${String(result.accepted)} (reqId ${String(frame.reqId)})`)
   } else {
     console.log('other result:', JSON.stringify(result).slice(0, 140))
   }
-  if (results >= 2) { ws.close(); process.exit(0) }
+  if (results >= 3) { ws.close(); process.exit(0) }
 })
 ws.on('unexpected-response', (_req, res) => { console.error('HTTP-STATUS', res.statusCode); process.exit(2) })
 ws.on('error', (err) => { console.error('WS-ERR', err.message); process.exit(1) })
