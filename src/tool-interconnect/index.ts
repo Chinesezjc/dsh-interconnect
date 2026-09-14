@@ -76,7 +76,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'interconnect_send',
     description: 'Deliver one text message to a live session on another DSH instance (same machine, '
-      + 'another machine, or another session), over a shared-secret-authenticated channel. '
+      + 'another machine, or another session). '
       + 'Returns whether the peer instance received it and which instance answered. '
       + 'Only a session with a running agent receives directly; a persisted one can be woken by '
       + 'setting resume, and when delivery fails the result reports the reason (for example '
@@ -87,8 +87,8 @@ export function apply(ctx: Context): void {
       instanceId: {
         type: 'string',
         required: true,
-        description: 'The peer instance id to deliver to, as configured under this instance\'s '
-          + 'interconnect peers map. Deliveries go over the persistent link to that instance.',
+        description: 'The peer instance id to deliver to, as configured for this instance\'s '
+          + 'interconnect peers.',
       },
       sessionId: {
         type: 'string',
@@ -212,8 +212,9 @@ export function apply(ctx: Context): void {
     name: 'interconnect_list',
     description: 'List the live sessions on a peer DSH instance, so a message can be addressed without '
       + 'knowing a session id in advance. Every returned sessionId is a valid interconnect_send target at '
-      + 'the time of the call. Only sessions with a running agent appear; reaching a persisted one that is '
-      + 'not listed requires interconnect_send with resume set.',
+      + 'the time of the call. Only sessions with a running agent appear, and a long listing stops at a '
+      + 'size bound, so a live session missing from it may simply not fit; reaching a persisted session '
+      + 'requires interconnect_send with resume set.',
     parameters: {
       instanceId: {
         type: 'string',
@@ -311,7 +312,7 @@ export function apply(ctx: Context): void {
         }
         const text = ((): string => {
           if (value.reason === 'no-sender-known') {
-            return 'not delivered: this session never received an interconnect message with a sender identity'
+            return 'not delivered: no sender identity is known to reply to'
           }
           if (value.reason === 'session-owned-by-subagent') {
             return 'not delivered: the recorded sender\'s session belongs to a subagent and its parent agent owns delivery'

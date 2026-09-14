@@ -354,7 +354,7 @@ describe('tool-interconnect', () => {
     const value = await tool.execute(args, { agent: { session: { id: 'local-sess' } }, signal: new AbortController().signal } as never)
     const rendered = tool.output.render(args, value as never)
     const text = (rendered as { text: string }[])[0]!.text
-    expect(text).toContain('never received an interconnect message with a sender identity')
+    expect(text).toContain('no sender identity is known to reply to')
     expect(value).toEqual({ delivered: false, instance: 'peer', reason: 'no-sender-known' })
     await dispose()
   })

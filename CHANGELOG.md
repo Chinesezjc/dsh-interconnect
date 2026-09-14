@@ -2,6 +2,20 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.8（2026-09-15）
+
+跟随 #3243 分支 head（`70ed636169`），同步 `tool-interconnect` 的模型可见文案。
+
+### 变更
+
+- `interconnect_send` 的描述回到上游措辞（不再额外声明 shared-secret 通道）；`instanceId` 参数说明改为「按本实例的 peers 映射配置，投递走该实例的持久链接」。
+- `interconnect_list` 的描述不再提 size bound（截断细节留在包 README）；`no-sender-known` 的工具渲染改为上游文案。
+
+### 验证
+
+- `pnpm run check`（typecheck + 163/163 tests + build）全绿。
+- 全口径（四源 + 三测试 + skill 正文）对 head 的实质差异为 0。
+
 ## 0.11.7（2026-09-15）
 
 文档修正，无代码变化。
