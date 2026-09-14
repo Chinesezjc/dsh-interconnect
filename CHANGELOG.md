@@ -262,7 +262,9 @@
 - 本地 `pnpm run check`（typecheck + 34/34 tests + build）全绿，负例已构造（移除 `peers` 激活自动 `link()` → 3 条测试转红）。
 - 实机端到端：ci-server 经 `interconnect_send(instanceId=..., resume:true)` 投递到 momoairi 持久会话成功，对端 agent 确认收到。
 
-## 0.8.0（2026-08-19）
+## 0.8.0（2026-08-19，未单独发布）
+
+此版本未发布到 npm，也没有对应 tag；下列改动随 0.9.0 发布。
 
 在 0.7 的 reply 基础上，让消息通道优先复用持久 WebSocket 长连接。
 
