@@ -1,6 +1,8 @@
 /** Host half: upgrade auth, WS msg/query frames, and instanceId-addressed delivery. */
+import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { IncomingMessage } from 'node:http'
+import { connect } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
@@ -224,7 +226,9 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
 }
 
 /** Serve one upgrade route over a real HTTP server and return its port. */
-async function serveUpgrade(upgrades: WebUpgradeRoute[]): Promise<{ port: number; close: () => Promise<void> }> {
+async function serveUpgrade(
+  upgrades: WebUpgradeRoute[],
+): Promise<{ port: number; connections: () => Promise<number>; close: () => Promise<void> }> {
   const server = createServer()
   server.on('upgrade', (req, socket, head) => {
     void upgrades[0]!.handler(req, socket, head)
@@ -233,6 +237,9 @@ async function serveUpgrade(upgrades: WebUpgradeRoute[]): Promise<{ port: number
   const address = server.address() as AddressInfo
   return {
     port: address.port,
+    connections: () => new Promise<number>((resolve, reject) => {
+      server.getConnections((error, count) => { if (error === null) resolve(count); else reject(error) })
+    }),
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error === undefined) resolve()
@@ -1134,7 +1141,10 @@ describe('interconnect upgrade auth edge paths', () => {
   } {
     const writes: string[] = []
     const socket = {
-      end: vi.fn((chunk?: string) => { if (chunk !== undefined) writes.push(chunk) }),
+      end: vi.fn((chunk?: string, callback?: () => void) => {
+        if (chunk !== undefined) writes.push(chunk)
+        callback?.()
+      }),
       destroy: vi.fn(),
     }
     return { req: { headers } as unknown as IncomingMessage, socket, writes }
@@ -1193,7 +1203,35 @@ describe('interconnect upgrade auth edge paths', () => {
     settleToken({ value: 'secret', source: 'env' })
     await wait(30)
     expect(writes.join('')).toContain('503 Service Unavailable')
-    expect(socket.destroy).not.toHaveBeenCalled()
+    // A refusal closes the socket for real: a client that keeps its own writing
+    // side open would otherwise hold the connection after the response.
+    expect(socket.destroy).toHaveBeenCalled()
+  })
+
+  it('closes the connection of a refused upgrade for a client that stays writable', async () => {
+    const receiver = await mounted('secret')
+    const served = await serveUpgrade(receiver.upgrades)
+    // A raw client that never half-closes its own side. `socket.end()` on the
+    // server only sends FIN, which would leave this connection live with its
+    // descriptor held; the refusal has to destroy it.
+    const client = connect({ host: '127.0.0.1', port: served.port, allowHalfOpen: true })
+    try {
+      await once(client, 'connect')
+      const answered = once(client, 'data')
+      client.write(
+        'GET /interconnect/link HTTP/1.1\r\n'
+        + `Host: 127.0.0.1:${String(served.port)}\r\n`
+        + 'Authorization: Bearer wrong-token\r\n'
+        + 'Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+      )
+      const [chunk] = await answered as [Buffer]
+      expect(chunk.toString('utf8')).toContain('401 Unauthorized')
+      await waitUntil(async () => (await served.connections()) === 0)
+    } finally {
+      client.destroy()
+      await served.close()
+      await receiver.dispose()
+    }
   })
 
   it('formats a non-Error rejection raised while refusing an upgrade', async () => {
@@ -2215,6 +2253,48 @@ describe('interconnect explicit null wire fields', () => {
         .toEqual({ delivered: false, instance: 'stray-peer', reason: 'unreachable' })
       expect(await sender.ctx.interconnect.send({ instanceId: 'stray-peer', sessionId: 'peer-sess', text: 'second' }))
         .toEqual({ delivered: true, instance: 'stray-peer' })
+    } finally {
+      await sender.dispose()
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => { if (error === undefined) resolve(); else reject(error) })
+      })
+    }
+  })
+
+  it('drops the fields a query answer kind does not declare', async () => {
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((resolve) => { wss.once('listening', resolve) })
+    const address = wss.address() as AddressInfo
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        const frame = JSON.parse(text) as { type: string; reqId: string; query?: { kind?: string } }
+        if (frame.type !== 'query') return
+        // The union merges keys across its branches, so a ping answer can carry
+        // a `sessions` list and a list answer the `accepted` ack.
+        socket.send(JSON.stringify({
+          type: 'query-result',
+          reqId: frame.reqId,
+          result: frame.query?.kind === 'ping'
+            ? { pong: true, instance: 'stray-peer', sessions: [{ sessionId: 'junk' }] }
+            : {
+              instance: 'stray-peer',
+              accepted: true,
+              sessions: [{ sessionId: 'peer-sess', title: 'T', status: 'idle', junk: 1 }],
+            },
+        }))
+      })
+    })
+    const sender = await mounted('secret', new Set([]), { 'stray-peer': `http://127.0.0.1:${String(address.port)}` })
+    try {
+      await wait(250) // link opens before either request goes out
+      expect(await sender.ctx.interconnect.ping('stray-peer')).toEqual({ pong: true, instance: 'stray-peer' })
+      expect(await sender.ctx.interconnect.list('stray-peer'))
+        .toEqual({ instance: 'stray-peer', sessions: [{ sessionId: 'peer-sess', title: 'T', status: 'idle' }] })
     } finally {
       await sender.dispose()
       await new Promise<void>((resolve, reject) => {

@@ -101,7 +101,6 @@ describe('tool-interconnect', () => {
       instanceId: 'peer',
       sessionId: 'sess-1',
       text: 'hi',
-      sender: { instanceId: 'self', sessionId: '' },
     })
     expect(value).toEqual({ delivered: true, instance: 'peer' })
     await dispose()
@@ -188,7 +187,6 @@ describe('tool-interconnect', () => {
       sessionId: 'sess-1',
       text: 'urgent',
       delivery: 'steer',
-      sender: { instanceId: 'self', sessionId: '' },
     })
     expect(value).toEqual({ delivered: true, instance: 'peer', delivery: 'steer' })
     await dispose()
@@ -380,9 +378,9 @@ describe('tool-interconnect', () => {
     await dispose()
   })
 
-  it('attributes the sender even when the executing agent id is absent', async () => {
-    // With address-free addressing the sender no longer depends on a config
-    // origin; it is always attached (with whatever session id is known).
+  it('attaches no sender when no executing agent supplies a session', async () => {
+    // `interconnect_reply` refuses this same precondition, and an empty session
+    // id would become a reply target the peer can never reach.
     const interconnect = fakeInterconnect()
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
@@ -392,7 +390,9 @@ describe('tool-interconnect', () => {
     )
     // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
     const mock = interconnect.send as unknown as { mock: { calls: [Record<string, unknown>][] } }
-    expect(typeof (mock.mock.calls[0]![0] as { sender: { sessionId: string } }).sender.sessionId).toBe('string')
+    expect(mock.mock.calls[0]![0]).not.toHaveProperty('sender')
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    expect(interconnect.selfSender).not.toHaveBeenCalled()
     await dispose()
   })
 })

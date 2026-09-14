@@ -106,9 +106,9 @@ export type SendResult =
     /** Echoed receiver instance id (diagnostic; never trusted for routing). */
     readonly instance: string
     /**
-       * The mode actually used, so a sender can tell whether its requested override
-       * took effect.
-       */
+     * The mode actually used, so a sender can tell whether its requested override
+     * took effect.
+     */
     readonly delivery?: DeliveryMode
   }
   | {
@@ -117,9 +117,9 @@ export type SendResult =
     /** Echoed receiver instance id (diagnostic; never trusted for routing). */
     readonly instance: string
     /**
-       * Why delivery failed, so a caller can distinguish "wrong target" from
-       * "receiver unreachable" instead of guessing from a bare boolean.
-       */
+     * Why delivery failed, so a caller can distinguish "wrong target" from
+     * "receiver unreachable" instead of guessing from a bare boolean.
+     */
     readonly reason: SendFailure
   }
 
@@ -271,7 +271,12 @@ export interface WebSocketLinkHandle {
 
 /** Service config bound by the Composition loader. */
 export interface Config {
-  /** Self-reported id of this instance, echoed in ping/send results for diagnostics. */
+  /**
+   * Self-reported id of this instance, echoed in ping/send results for diagnostics.
+   * It must be unique across the mesh: lifecycle fan-out addresses links by this
+   * announcement, so two instances sharing one id receive events on only one of
+   * their links.
+   */
   readonly instanceId: string
   /** Request timeout for outbound deliveries, in milliseconds. */
   readonly requestTimeoutMs: number

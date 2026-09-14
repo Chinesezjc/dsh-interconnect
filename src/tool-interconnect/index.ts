@@ -157,14 +157,15 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       const sessionId = exec.agent?.session.id
-      const self = interconnect.selfSender(sessionId === undefined ? '' : String(sessionId))
       const result = await raceSignal(exec.signal, interconnect.send({
         instanceId: args.instanceId,
         sessionId: args.sessionId,
         text: args.text,
         // Attribute this instance as the sender so the peer can reply back. The
-        // calling session id comes from the executing agent (the session sending).
-        sender: self,
+        // calling session id comes from the executing agent; a call without one
+        // attaches no sender rather than an empty identity the peer would record
+        // as a reply target.
+        ...(sessionId === undefined ? {} : { sender: interconnect.selfSender(String(sessionId)) }),
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
         ...(args.resume === undefined ? {} : { resume: args.resume }),
       }))

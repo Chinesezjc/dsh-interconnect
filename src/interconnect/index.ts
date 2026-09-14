@@ -192,21 +192,58 @@ const projectMsgResult = (result: SendResult): SendResult =>
     : { delivered: false, instance: result.instance, reason: result.reason }
 
 /**
- * Whether one decoded `query-result` payload satisfies the schema for the
- * request kind that asked for it. `z.resolve` rejects with a `ValidationError`
- * on a mismatch, so the parse is contained here instead of throwing out of the
- * frame handler; `null` (a JSON `null` payload) resolves to itself and is not
- * an object answer.
+ * Decode one `query-result` payload against the schema for the request kind
+ * that asked for it. `z.resolve` rejects with a `ValidationError` on a
+ * mismatch, so the parse is contained here instead of throwing out of the frame
+ * handler; the frame schema requires the `result` field, so a payload that
+ * reaches this function is an object. The projections below read the fields the
+ * schema validated, and schemastery types every optional field as `null`-capable,
+ * so each field is read through the wire view its kind declares.
  * @param schema - the answer schema for the request kind.
  * @param result - the decoded `query-result` payload.
- * @returns true when the payload satisfies the schema.
+ * @returns the parsed payload's fields, or undefined when it does not match.
  */
-const acceptsQueryResult = (schema: Parameters<typeof z.resolve>[1], result: unknown): boolean => {
+const parseQueryResult = (
+  schema: Parameters<typeof z.resolve>[1],
+  result: unknown,
+): Record<string, unknown> | undefined => {
   try {
-    const [parsed] = z.resolve(result, schema, {}) as [unknown]
-    return parsed !== undefined && parsed !== null
+    const [parsed] = z.resolve(result, schema, {}) as [Record<string, unknown>]
+    return parsed
   } catch {
-    return false
+    return undefined
+  }
+}
+
+/**
+ * Project one decoded `ping` answer onto its declared fields. Schemastery keeps
+ * the keys of every union branch it considered, so an answer must not carry the
+ * `sessions` rows or any other key this kind does not declare.
+ * @param result - the decoded `query-result` payload.
+ * @returns the answer as a {@link PingResult}, or undefined on a mismatch.
+ */
+const projectPingResult = (result: unknown): PingResult | undefined => {
+  const parsed = parseQueryResult(pingResultSchema, result)
+  return parsed === undefined ? undefined : { pong: true, instance: parsed.instance as string }
+}
+
+/**
+ * Project one decoded `list` answer onto its declared fields, rows included,
+ * for the same reason {@link projectPingResult} exists.
+ * @param result - the decoded `query-result` payload.
+ * @returns the answer as a {@link ListResult}, or undefined on a mismatch.
+ */
+const projectListResult = (result: unknown): ListResult | undefined => {
+  const parsed = parseQueryResult(listResultSchema, result)
+  if (parsed === undefined) return undefined
+  const rows = parsed.sessions as Array<Record<string, unknown>>
+  return {
+    instance: parsed.instance as string,
+    sessions: rows.map((row): InterconnectSessionSummary => ({
+      sessionId: row.sessionId as string,
+      ...(row.title === undefined || row.title === null ? {} : { title: row.title as string }),
+      ...(row.status === undefined || row.status === null ? {} : { status: row.status as string }),
+    })),
   }
 }
 
@@ -556,9 +593,7 @@ export class InterconnectService extends Service {
     // just the frame union: a peer answering a `list` with a ping-shaped
     // result would otherwise crash the tool on `result.sessions.map`. An
     // answer that fails its kind's shape is treated as no answer at all.
-    const accept = query.kind === 'ping'
-      ? (result: unknown): result is PingResult => acceptsQueryResult(pingResultSchema, result)
-      : (result: unknown): result is ListResult => acceptsQueryResult(listResultSchema, result)
+    const accept = query.kind === 'ping' ? projectPingResult : projectListResult
     try {
       return await this.waitForResult(reqId, 'query', (failure) => {
         const wrote = state.sendFrame({ type: 'query', reqId, query })
@@ -577,23 +612,23 @@ export class InterconnectService extends Service {
     reqId: string,
     kind: 'msg' | 'query',
     send: (failure: (error: unknown) => void) => void,
-    accept?: (result: unknown) => boolean,
+    accept?: (result: unknown) => unknown,
   ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingMessages.delete(reqId)
         reject(new Error(`interconnect: no result for ${reqId} within ${this.requestTimeoutMs}ms`))
       }, this.requestTimeoutMs)
-      this.pendingMessages.set(reqId, {
-        timer,
-        kind,
-        ...(accept === undefined ? {} : { accept }),
-        resolve: (result: unknown) => {
-          clearTimeout(timer)
-          this.pendingMessages.delete(reqId)
-          resolve(result)
-        },
-      })
+      const settle = (result: unknown): void => {
+        clearTimeout(timer)
+        this.pendingMessages.delete(reqId)
+        resolve(result)
+      }
+      // Only a query pending carries a projector; a `msg-result` is projected by
+      // `projectMsgResult` at its own settle site.
+      this.pendingMessages.set(reqId, kind === 'query'
+        ? { timer, kind, accept: accept as (result: unknown) => unknown, resolve: settle }
+        : { timer, kind, resolve: settle })
       /* v8 ignore start -- the failure callback is gated by the writable() check; the timeout rejects instead. */
       send((error: unknown) => {
         clearTimeout(timer)
@@ -917,6 +952,18 @@ export class InterconnectService extends Service {
     return credential === undefined || credential.value.length === 0 ? undefined : credential.value
   }
 
+  /**
+   * Answer one refused upgrade and close its socket. `socket.end()` alone only
+   * half-closes the connection: a client that keeps its own writing side open
+   * (a socket created with `allowHalfOpen`) leaves the connection live, and a
+   * refused socket never enters the link pool, so nothing else would reap it.
+   * @param socket - the refused upgrade socket.
+   * @param response - the complete HTTP response sent to the client.
+   */
+  private refuseUpgrade(socket: Duplex, response: string): void {
+    socket.end(response, () => { socket.destroy() })
+  }
+
   /** Inbound WebSocket upgrade: authenticate the bearer header, then accept. */
   private async handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     let token: string | undefined
@@ -928,11 +975,11 @@ export class InterconnectService extends Service {
       // leave this client hanging on an open socket and surface as an unhandled
       // rejection.
       this.ctx.logger.warn(`interconnect: upgrade token read failed: ${error instanceof Error ? error.message : String(error)}`)
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
+      this.refuseUpgrade(socket, 'HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
       return
     }
     if (token === undefined) {
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
+      this.refuseUpgrade(socket, 'HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
       return
     }
     // The token read is an await, so the service can be torn down (or the
@@ -940,13 +987,13 @@ export class InterconnectService extends Service {
     // socket to a pool the teardown already cleared, with no owner left to
     // close it or answer its heartbeat.
     if (this.disposed) {
-      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 11\r\n\r\nunavailable')
+      this.refuseUpgrade(socket, 'HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 11\r\n\r\nunavailable')
       return
     }
     const expected = `Bearer ${token}`
     const header = req.headers.authorization
     if (header === undefined || !timingSafeEqual(header, expected)) {
-      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 12\r\n\r\nunauthorized')
+      this.refuseUpgrade(socket, 'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 12\r\n\r\nunauthorized')
       return
     }
     this.server.handleUpgrade(req, socket, head, (websocket) => {
@@ -1059,9 +1106,11 @@ export class InterconnectService extends Service {
     if (frame.type === 'query-result') {
       const pending = this.pendingMessages.get(frame.reqId)
       // Only a result that satisfies the pending request's own shape settles
-      // it; anything else is dropped and the request times out as unreachable.
-      if (pending !== undefined && pending.kind === 'query' && (pending.accept === undefined || pending.accept(frame.result))) {
-        ;pending.resolve?.(frame.result)
+      // it, and the projecting accept returns what settles: anything else is
+      // dropped and the request times out as unreachable.
+      if (pending !== undefined && pending.kind === 'query') {
+        const answer = pending.accept(frame.result)
+        if (answer !== undefined) pending.resolve?.(answer)
       }
       return
     }
@@ -1103,13 +1152,20 @@ export class InterconnectService extends Service {
 interface PendingMessage {
   readonly timer: ReturnType<typeof setTimeout>
 }
-interface MutablePendingMessage extends PendingMessage {
-  /** Whether the pending awaits a `msg-result` or a `query-result` frame. */
-  kind: 'msg' | 'query'
+/** A pending that awaits a `msg-result` frame. */
+interface PendingMsg extends PendingMessage {
+  kind: 'msg'
   resolve?: (result: unknown) => void
-  /** Shape gate for result frames: the answer must match the request's kind. */
-  accept?: (result: unknown) => boolean
 }
+/** A pending that awaits a `query-result` frame, gated by its request kind's projector. */
+interface PendingQuery extends PendingMessage {
+  kind: 'query'
+  resolve?: (result: unknown) => void
+  /** Kind gate and projector: returns the answer to settle with, or undefined to drop the frame. */
+  accept: (result: unknown) => unknown
+}
+/** One pending request: a `msg` outcome is projected at its settle site, a `query` outcome by its own projector. */
+type MutablePendingMessage = PendingMsg | PendingQuery
 
 /**
  * One outbound WebSocket peer link: dials, re-dials with backoff after an

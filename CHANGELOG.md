@@ -2,6 +2,20 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.4（2026-09-15）
+
+跟随 #3243 分支 head（`c83b249064`）。
+
+### 变更
+
+- **查询结果改为「校验并投影」**：ping/list 的答复先按调用方问的 kind 校验形状（`parseQueryResult`），再投影成 `PingResult` / `ListResult`（`projectPingResult` / `projectListResult`），替代此前只返回布尔值的 `acceptsQueryResult`。
+- `interconnect_send` / `interconnect_reply` 的 sender 改为先取 `selfSender(...)` 再带上，不再用条件展开构造。
+
+### 验证
+
+- `pnpm run check`（typecheck + 158/158 tests + build）全绿。
+- 与 head `c83b249064` 逐文件对照：四个源文件的 monorepo 独有实质差异为 0。
+
 ## 0.11.3（2026-09-14）
 
 跟随 #3243 分支 head 的又一批改动（重建 commit `56bac7eabe`）。
