@@ -1,8 +1,8 @@
 /**
- * Wire contracts for `@deepseek-ai/dsh-interconnect`.
+ * Wire contracts for `dsh-interconnect`.
  * The transport is one WebSocket link per peer; this module defines only the
  * business payloads that ride inside link frames.
- * @module @deepseek-ai/dsh-interconnect
+ * @module dsh-interconnect
  */
 
 

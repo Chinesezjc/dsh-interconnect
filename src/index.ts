@@ -7,7 +7,6 @@
 
 export type * from './interconnect/types.ts'
 export {
-  INTERCONNECT_CHANNEL,
   INTERCONNECT_TOKEN_REF,
   InterconnectService,
   default,

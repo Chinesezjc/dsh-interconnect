@@ -5,10 +5,10 @@
  *
  * This is a thin skill provider, intentionally separate from
  * `tool-interconnect`: the service and tools remain usable without the skill,
- * while a preset that wants model guidance can mount this row alongside them.
- * It injects the `interconnect` service so the skill only appears when the
- * transport it describes is actually present.
- * @module @deepseek-ai/dsh-skill-interconnect
+ * and the profile layer that enables cross-instance handoff mounts this row
+ * with them. It injects the `interconnect` service so the skill only appears
+ * when the transport it describes is actually present.
+ * @module @deepseek-ai/dsh-experimental-skill-interconnect
  */
 
 import { readFile } from 'node:fs/promises'

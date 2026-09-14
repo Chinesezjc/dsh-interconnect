@@ -2,6 +2,27 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.1（2026-09-14）
+
+补齐 0.11.0 遗漏的 review 收尾加固。0.11.0 只回移到 #3243 分支 08-30 的状态，漏了 09-10 的收尾提交；本版以分支最新 head（`f6fdeaf7de`）重新对齐。
+
+### 修复
+
+- **`list` 答案有行数上限**：单个答案最多 `MAX_LISTED_SESSIONS`（100）行。整帧必须待在链路的帧上限内，ws 对超限帧会直接关闭链路，所以 live session 极多的对端改为只回答前若干行，而不是把传输打断。
+- **ping/list 结果按请求类型校验**：帧联合体会合并未知键，`list` 形状的负载此前能满足 `ping` 请求；现在按调用方问的 kind 校验结果，形状不符视为无答复。
+- **upgrade 失败不再逃逸**：入站升级处理器返回的 promise 被捕获，失败时告警并销毁 socket。
+- **服务已 dispose 时的入站升级返回 503**，不再继续 `handleUpgrade`。
+- **binary 与字符串帧**：`message` 回调直接忽略 binary；帧长度按字符串与分片正确累加。
+- **无共享 token 时只告警一次**（`warnedNoToken`），不再每次重连刷日志。
+- 删除已无用的 `INTERCONNECT_CHANNEL` 导出。
+
+### 验证
+
+- 单测 145 → 154（补齐 09-10 收尾的回归用例）。
+- 负例实测：摘除 `list` 上限后 `caps a list answer at the row limit the link frame can carry` 转红。
+- 与 monorepo #3243 分支 head 逐文件对照，功能差异只剩镜像谓词、依赖来源与内部路径适配。
+- `pnpm run check`（typecheck + 154/154 tests + build）全绿。
+
 ## 0.11.0（2026-09-14）
 
 把 monorepo #3243 分支（08-28～08-30 两轮 review 收敛）的全部加固回移到独立仓库，使合入主仓库之前的现役版本不再带可被对端触发的崩溃。

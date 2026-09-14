@@ -1,5 +1,6 @@
 /** Host half: upgrade auth, WS msg/query frames, and instanceId-addressed delivery. */
 import { createServer } from 'node:http'
+import type { IncomingMessage } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
@@ -7,7 +8,7 @@ import type { WebServer, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver
 import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, SessionStartSource } from '@deepseek-ai/dsh-agent'
 import InterconnectService, { INTERCONNECT_TOKEN_REF, linkUrl } from '../src/interconnect/index.ts'
 import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'
 import WebSocket, { WebSocketServer } from 'ws'
@@ -141,8 +142,9 @@ async function queryList(service: InterconnectService): Promise<Record<string, u
 const SESSION_ID = 'session-1'
 
 /** One event-payload agent carrying only the session identity the service reads. */
-const agentPayload = (id: string): { agent: Agent } => ({
+const agentPayload = (id: string): { agent: Agent; source: SessionStartSource } => ({
   agent: { id, session: { id, header: {} } } as unknown as Agent,
+  source: 'startup',
 })
 
 
@@ -1126,6 +1128,132 @@ describe('interconnect upgrade auth edge paths', () => {
     await dispose()
   })
 
+  /** Minimal upgrade request/socket pair for driving the route handler directly. */
+  function fakeUpgradePair(headers: Record<string, string> = {}): {
+    req: IncomingMessage
+    socket: { end: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }
+    writes: string[]
+  } {
+    const writes: string[] = []
+    const socket = {
+      end: vi.fn((chunk?: string) => { if (chunk !== undefined) writes.push(chunk) }),
+      destroy: vi.fn(),
+    }
+    return { req: { headers } as unknown as IncomingMessage, socket, writes }
+  }
+
+  it('brings a token-less peer link up when the credential arrives later', async () => {
+    const receiver = await mounted('secret')
+    const r = await serveUpgrade(receiver.upgrades)
+    let token: string | undefined
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer([]) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+    ctx.provide('credentials', {
+      async resolve() {
+        return token === undefined ? undefined : { value: token, source: 'env' }
+      },
+    } as unknown as CredentialProvider)
+    // The warn fires from the activation dial, so the spy installs first.
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'late-token',
+      requestTimeoutMs: 10000,
+      peers: { 'peer-b': `http://127.0.0.1:${String(r.port)}` },
+    })
+    await fiber.await()
+    try {
+      // The first dial resolves no token and must warn once, then retry on the
+      // reconnect backoff so a credential added later still links the peer.
+      await waitUntil(() => warn.mock.calls.some(([line]) => String(line).includes('no shared token configured')))
+      expect(await ctx.interconnect.ping('peer-b')).toBeUndefined()
+      token = 'secret'
+      await waitUntil(async () => (await ctx.interconnect.ping('peer-b')) !== undefined, 5000)
+    } finally {
+      warn.mockRestore()
+      await fiber.dispose()
+      await r.close()
+      await receiver.dispose()
+    }
+  })
+
+  it('refuses an inbound upgrade that resolves its token after teardown', async () => {
+    let settleToken!: (value: { value: string; source: string }) => void
+    const pendingToken = new Promise<{ value: string; source: string }>((resolve) => { settleToken = resolve })
+    const ctx = new Context()
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+    ctx.provide('credentials', { resolve: () => pendingToken } as unknown as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, { instanceId: 'closing-upgrade', requestTimeoutMs: 10000, peers: {} })
+    await fiber.await()
+    const { req, socket, writes } = fakeUpgradePair({ authorization: 'Bearer secret' })
+    // The route handler is detached by the webserver, so the token read can
+    // straddle teardown; accepting then would pool a socket no owner closes.
+    void upgrades[0]!.handler(req, socket as never, Buffer.alloc(0))
+    await fiber.dispose()
+    settleToken({ value: 'secret', source: 'env' })
+    await wait(30)
+    expect(writes.join('')).toContain('503 Service Unavailable')
+    expect(socket.destroy).not.toHaveBeenCalled()
+  })
+
+  it('formats a non-Error rejection raised while refusing an upgrade', async () => {
+    const receiver = await mounted(undefined)
+    const { req, socket } = fakeUpgradePair({ authorization: 'Bearer secret' })
+    // Refusing a token-less upgrade ends the socket; a throw from that write is
+    // not necessarily an Error, and the managed catch still has to report it.
+    socket.end.mockImplementation(() => { throw 'socket wedged' })
+    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
+    void receiver.upgrades[0]!.handler(req, socket as never, Buffer.alloc(0))
+    await waitUntil(() => socket.destroy.mock.calls.length > 0)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('socket wedged'))
+    warn.mockRestore()
+    await receiver.dispose()
+  })
+
+  it('logs and destroys the socket when an upgrade fails after authentication', async () => {
+    const receiver = await mounted('secret')
+    const { req, socket } = fakeUpgradePair({ authorization: 'Bearer secret' })
+    // A socket the ws server cannot upgrade makes the detached handler throw;
+    // the route's managed catch reports it and drops the client.
+    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
+    void receiver.upgrades[0]!.handler(req, socket as never, Buffer.alloc(0))
+    await waitUntil(() => socket.destroy.mock.calls.length > 0)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('upgrade failed'))
+    warn.mockRestore()
+    await receiver.dispose()
+  })
+
+  it('keeps a token-less peer down when the service closes before the token resolves', async () => {
+    let settleToken!: (value: undefined) => void
+    const pendingToken = new Promise<undefined>((resolve) => { settleToken = resolve })
+    let resolveCalls = 0
+    const ctx = new Context()
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+    ctx.provide('credentials', {
+      resolve: () => {
+        resolveCalls += 1
+        return pendingToken
+      },
+    } as unknown as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'closing',
+      requestTimeoutMs: 10000,
+      peers: { 'peer-b': 'http://127.0.0.1:1' },
+    })
+    await fiber.await()
+    // Disposal lands while the token read is still pending, so the dial resumes
+    // with no token on a closed service and must stop instead of scheduling a
+    // reconnect against a fiber that no longer exists.
+    await fiber.dispose()
+    settleToken(undefined)
+    await wait(30)
+    expect(resolveCalls).toBe(1)
+  })
+
   it('fails closed when the token read itself rejects', async () => {
     const throwingCredentials = {
       async resolve() {
@@ -1156,7 +1284,7 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     const receiver = await mounted('secret', new Set([]))
     const { socket, handlers } = fakeSocket()
     attachSocket(receiver.service, socket)
-    handlers.get('message')!([Buffer.from('not-a-frame')])
+    handlers.get('message')!(Buffer.from('not-a-frame'), true) // isBinary=true: ws flags the opcode
     // oxlint-disable-next-line typescript/unbound-method -- fake socket arrow, no `this`
     expect(socket.send).toHaveBeenCalledTimes(1) // only the hello announcement
     await receiver.dispose()
@@ -1171,6 +1299,18 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('dropping malformed link frame'))
     warn.mockRestore()
     await receiver.dispose()
+  })
+
+  it('caps a list answer at the row limit the link frame can carry', async () => {
+    const live = new Set(Array.from({ length: 120 }, (_unused, index) => `session-${String(index)}`))
+    const receiver = await mounted('secret', live)
+    try {
+      const answers = await queryList(receiver.service)
+      const result = answers[0]?.result as { sessions?: unknown[] } | undefined
+      expect(result?.sessions).toHaveLength(100)
+    } finally {
+      await receiver.dispose()
+    }
   })
 
   it('drops an event frame whose notification is missing or null', async () => {
@@ -1196,6 +1336,36 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     handlers.get('message')!(Buffer.alloc(1024 * 1024 + 1))
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('dropping oversized link frame'))
     warn.mockRestore()
+    await receiver.dispose()
+  })
+
+  it('answers a query frame delivered as an array of buffers', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]))
+    const { socket, handlers } = fakeSocket()
+    attachSocket(receiver.service, socket)
+    const sentBefore = socket.sent.length
+    // ws hands fragmented deliveries to the same listener as an array; the
+    // size cap and the decode must read every part.
+    const text = JSON.stringify({ type: 'query', reqId: 'arr-1', query: { kind: 'list' } })
+    const split = Math.floor(text.length / 2)
+    handlers.get('message')!([Buffer.from(text.slice(0, split)), Buffer.from(text.slice(split))], false)
+    await wait(30)
+    expect(socket.sent.slice(sentBefore).map(frame => JSON.parse(frame) as Record<string, unknown>))
+      .toEqual([expect.objectContaining({ type: 'query-result', reqId: 'arr-1' })])
+    await receiver.dispose()
+  })
+
+  it('answers a query frame delivered as a raw ArrayBuffer', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]))
+    const { socket, handlers } = fakeSocket()
+    attachSocket(receiver.service, socket)
+    const sentBefore = socket.sent.length
+    // A configured binaryType delivers frames as ArrayBuffers rather than Buffers.
+    const bytes = new TextEncoder().encode(JSON.stringify({ type: 'query', reqId: 'buf-1', query: { kind: 'list' } }))
+    handlers.get('message')!(bytes.buffer, false)
+    await wait(30)
+    expect(socket.sent.slice(sentBefore).map(frame => JSON.parse(frame) as Record<string, unknown>))
+      .toEqual([expect.objectContaining({ type: 'query-result', reqId: 'buf-1' })])
     await receiver.dispose()
   })
 
@@ -1715,6 +1885,22 @@ describe('interconnect query-result answer validation', () => {
     try {
       await wait(250)
       const result = await sender.ctx.interconnect.ping('lying-peer')
+      expect(result).toBeUndefined()
+    } finally {
+      await sender.dispose()
+      await peer.close()
+    }
+  })
+
+  it('answers undefined when a peer returns a list row that is not a session', async () => {
+    // The union admits a ping-shaped payload for a list request, and its object
+    // resolver merges unknown keys, so a `sessions` array of nulls would pass a
+    // mere Array.isArray check and then throw in the consumer.
+    const peer = await answeringPeer({ pong: true, instance: 'liar', sessions: [null] })
+    const sender = await mounted('secret', new Set([]), { 'lying-peer': `http://127.0.0.1:${String(peer.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
+    try {
+      await wait(250)
+      const result = await sender.ctx.interconnect.list('lying-peer')
       expect(result).toBeUndefined()
     } finally {
       await sender.dispose()

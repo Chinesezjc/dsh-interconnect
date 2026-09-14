@@ -6,10 +6,9 @@
  * a local session last heard from.
  *
  * The tools consume the host-plane `interconnect` service and publish nothing
- * themselves, so this row sits as an ordinary tool plugin in a preset while
- * the service it reaches stays host-side (the same split `tool-goal` uses
- * against `goals`).
- * @module @deepseek-ai/dsh-tool-interconnect
+ * themselves; the profile layer that enables cross-instance handoff mounts the
+ * service, these tools, and the companion skill together.
+ * @module @deepseek-ai/dsh-experimental-tool-interconnect
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -128,9 +127,9 @@ export function apply(ctx: Context): void {
             text: `delivered to ${value.instance}${value.delivery === undefined ? '' : ` via ${value.delivery}`}`,
           }]
         }
-        // Each failure gets the response it actually needs: a not-live target is
-        // the caller's to re-choose, while an unreachable peer may just be worth
-        // The peer's lack of an answer is a delivery outcome, not a liveness claim.
+        // Each failure gets the response it actually needs: a not-live target
+        // is the caller's to re-choose, while an unreachable peer is a delivery
+        // outcome rather than a liveness claim.
         const text = ((): string => {
           switch (value.reason) {
             case 'unreachable':
@@ -212,8 +211,8 @@ export function apply(ctx: Context): void {
     name: 'interconnect_list',
     description: 'List the live sessions on a peer DSH instance, so a message can be addressed without '
       + 'knowing a session id in advance. Every returned sessionId is a valid interconnect_send target at '
-      + 'the time of the call. Only live sessions appear: a session that exists on the peer but has no '
-      + 'running agent is not listed and cannot receive a message.',
+      + 'the time of the call. Only sessions with a running agent appear; reaching a persisted one that is '
+      + 'not listed requires interconnect_send with resume set.',
     parameters: {
       instanceId: {
         type: 'string',

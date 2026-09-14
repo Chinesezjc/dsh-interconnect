@@ -9,7 +9,7 @@
  * `Authorization` header this service authenticates on. Owning a plain
  * upgrade route keeps bearer-token auth at the boundary where the header is
  * readable and fails closed when the token is unconfigured.
- * @module @deepseek-ai/dsh-interconnect
+ * @module dsh-interconnect
  */
 
 import { Context, Service, LoggerService } from '@deepseek-ai/cordis'
@@ -76,11 +76,6 @@ function assertNever(value: never): never {
 }
 
 export type * from './types.ts'
-/**
- * Pathname prefix under which this service's WebSocket upgrade route lives.
- * The persistent peer link is established at `<baseURL>/interconnect/link`.
- */
-export const INTERCONNECT_CHANNEL = '/interconnect'
 
 /**
  * Credential reference holding the shared auth token. Both halves of a link
@@ -109,13 +104,19 @@ declare module '@deepseek-ai/cordis' {
 
 const PLUGIN_SOURCE = 'dsh-interconnect'
 
-/** WebSocket upgrade pathname owning the persistent peer link. */
 /** Maximum inbound link-frame size in bytes; larger frames are dropped as protocol violations. */
 const MAX_LINK_FRAME_BYTES = 1024 * 1024
 /** Handshake window for an outbound dial; a CONNECTING socket past this is terminated and re-dialed. */
 const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
 /** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
+/**
+ * Maximum session rows one `list` answer carries. The whole answer must stay
+ * inside {@link MAX_LINK_FRAME_BYTES}, and ws closes a link that receives an
+ * over-cap frame — so a peer with a very large live set answers the first rows
+ * instead of breaking the transport.
+ */
+const MAX_LISTED_SESSIONS = 100
 
 /** Wire union for the discriminated EventNotification fact (shared by HTTP and WS). */
 const notificationSchema = z.union([
@@ -134,17 +135,51 @@ const notificationSchema = z.union([
  */
 const senderSchema = z.object({ instanceId: z.string(), sessionId: z.string() })
 
+/**
+ * Wire shape of the ping answer. Validated against the KIND of query the
+ * caller asked, not only the frame union: the union's branches merge their
+ * unknown keys, so a `list`-shaped payload would otherwise satisfy a `ping`
+ * request.
+ */
+const pingResultSchema = z.object({ pong: z.const(true).required(), instance: z.string().required() })
+
+/**
+ * Wire shape of the live-session list. Every row must carry a `sessionId`
+ * string: the consumer builds its tool result by reading that field, so an
+ * unvalidated row would throw instead of reading as an unreachable peer.
+ */
+const listResultSchema = z.object({
+  instance: z.string().required(),
+  sessions: z.array(z.object({
+    sessionId: z.string().required(),
+    title: z.string().required(false),
+    status: z.string().required(false),
+  })).required(),
+})
+
+/**
+ * Whether one decoded `query-result` payload satisfies the schema for the
+ * request kind that asked for it. `z.resolve` rejects with a `ValidationError`
+ * on a mismatch, so the parse is contained here instead of throwing out of the
+ * frame handler; `null` (a JSON `null` payload) resolves to itself and is not
+ * an object answer.
+ * @param schema - the answer schema for the request kind.
+ * @param result - the decoded `query-result` payload.
+ * @returns true when the payload satisfies the schema.
+ */
+const acceptsQueryResult = (schema: Parameters<typeof z.resolve>[1], result: unknown): boolean => {
+  try {
+    const [parsed] = z.resolve(result, schema, {}) as [unknown]
+    return parsed !== undefined && parsed !== null
+  } catch {
+    return false
+  }
+}
+
 /** Wire shape of one `query-result`: the ping answer, the live-session list, or the event-query ack. */
 const queryResultSchema = z.union([
-  z.object({ pong: z.const(true).required(), instance: z.string().required() }),
-  z.object({
-    instance: z.string().required(),
-    sessions: z.array(z.object({
-      sessionId: z.string().required(),
-      title: z.string().required(false),
-      status: z.string().required(false),
-    })).required(),
-  }),
+  pingResultSchema,
+  listResultSchema,
   z.object({ accepted: z.const(true).required() }),
 ])
 
@@ -250,7 +285,15 @@ export class InterconnectService extends Service {
 
     const upgrade: WebUpgradeRoute = {
       path: LINK_CHANNEL,
-      handler: (req, socket, head) => { void this.handleUpgrade(req, socket, head) },
+      handler: (req, socket, head) => {
+        // `handleUpgrade` handles its own refusals; this catch keeps an
+        // unexpected failure from becoming an unhandled rejection behind a
+        // client left waiting on an open socket.
+        void this.handleUpgrade(req, socket, head).catch((error: unknown) => {
+          this.ctx.logger.warn(`interconnect: upgrade failed: ${error instanceof Error ? error.message : String(error)}`)
+          socket.destroy()
+        })
+      },
     }
     // The webserver is optional: without one the service still dials peers and
     // delivers over those outbound links (outbound-only mode). Registering the
@@ -480,14 +523,8 @@ export class InterconnectService extends Service {
     // result would otherwise crash the tool on `result.sessions.map`. An
     // answer that fails its kind's shape is treated as no answer at all.
     const accept = query.kind === 'ping'
-      ? (result: unknown): result is PingResult =>
-        typeof result === 'object' && result !== null
-          && (result as { pong?: unknown }).pong === true
-          && typeof (result as { instance?: unknown }).instance === 'string'
-      : (result: unknown): result is ListResult =>
-        typeof result === 'object' && result !== null
-          && Array.isArray((result as { sessions?: unknown }).sessions)
-          && typeof (result as { instance?: unknown }).instance === 'string'
+      ? (result: unknown): result is PingResult => acceptsQueryResult(pingResultSchema, result)
+      : (result: unknown): result is ListResult => acceptsQueryResult(listResultSchema, result)
     try {
       return await this.waitForResult(reqId, 'query', (failure) => {
         const wrote = state.sendFrame({ type: 'query', reqId, query })
@@ -670,9 +707,11 @@ export class InterconnectService extends Service {
   }
 
   /**
-   * Summarize every live local session so a sender can discover valid targets
+   * Summarize the live local sessions so a sender can discover valid targets
    * instead of having to know a session id already. Only live agents are listed
-   * because `send` can reach exactly those.
+   * because `send` can reach exactly those, and the answer carries at most
+   * {@link MAX_LISTED_SESSIONS} rows so a large live set cannot push the
+   * `query-result` frame past the link's frame cap.
    *
    * Title and status are best-effort: the title projection is an optional
    * service, and a receiver without it still returns the ids. A projection that
@@ -685,7 +724,7 @@ export class InterconnectService extends Service {
     // contradicts `send`.
     const reachable = this.ctx.agents.list()
       .filter(agent => !isSessionOwnedBySubagent(this.ctx, agent.session, agent))
-    const sessions = reachable.map((agent): InterconnectSessionSummary => {
+    const sessions = reachable.slice(0, MAX_LISTED_SESSIONS).map((agent): InterconnectSessionSummary => {
       let title: string | undefined
       try {
         const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
@@ -866,6 +905,14 @@ export class InterconnectService extends Service {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
       return
     }
+    // The token read is an await, so the service can be torn down (or the
+    // webserver route withdrawn) before it settles. Accepting here would add a
+    // socket to a pool the teardown already cleared, with no owner left to
+    // close it or answer its heartbeat.
+    if (this.disposed) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 11\r\n\r\nunavailable')
+      return
+    }
     const expected = `Bearer ${token}`
     const header = req.headers.authorization
     if (header === undefined || !timingSafeEqual(header, expected)) {
@@ -891,7 +938,10 @@ export class InterconnectService extends Service {
     websocket.on('pong', () => {
       ;(websocket as WebSocket & { isAlive: boolean }).isAlive = true
     })
-    websocket.on('message', (data: RawData) => {
+    websocket.on('message', (data: RawData, isBinary: boolean) => {
+      // ws flags the frame opcode: binary frames are a protocol violation (the
+      // link vocabulary is JSON text), so drop them before parsing.
+      if (isBinary) return
       this.handleFrame(websocket, data)
     })
     websocket.on('close', () => {
@@ -906,16 +956,29 @@ export class InterconnectService extends Service {
   }
 
   /** Parse and route one inbound link frame, attributing events to the socket's announced peer. */
-  private handleFrame(socket: WebSocket, data: RawData): void {
-    if (Array.isArray(data)) return // binary frames are a protocol violation; ignore
+  private handleFrame(socket: WebSocket, data: RawData | string): void {
     // Cap inbound frames well below ws's 100 MiB default: a link frame is at
     // most one small message plus metadata, so a larger frame is a hostile or
     // broken peer, not a legitimate handoff.
-    if (data.byteLength > MAX_LINK_FRAME_BYTES) {
+    const byteLength = typeof data === 'string'
+      ? Buffer.byteLength(data)
+      : Array.isArray(data)
+        ? data.reduce((total, part) => total + part.byteLength, 0)
+        : data.byteLength
+    if (byteLength > MAX_LINK_FRAME_BYTES) {
       this.ctx.logger.warn('interconnect: dropping oversized link frame')
       return
     }
-    const text = Buffer.isBuffer(data) ? data.toString('utf8') : Buffer.from(data).toString('utf8')
+    // Text frames arrive as Buffers over real sockets (ws flags the opcode
+    // separately); the other RawData arms cover alternate binaryType
+    // deliveries and the string arm the direct test seams.
+    const text = typeof data === 'string'
+      ? data
+      : Array.isArray(data)
+        ? Buffer.concat(data).toString('utf8')
+        : Buffer.isBuffer(data)
+          ? data.toString('utf8')
+          : Buffer.from(data).toString('utf8')
     let parsed: unknown
     try {
       parsed = z.resolve(JSON.parse(text), linkFrameSchema, {})[0]
@@ -1029,6 +1092,7 @@ class LinkState implements WebSocketLinkHandle {
   private closed = false
   private retry = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private warnedNoToken = false
   /** Dial-registered handlers, removed by reference on close/reroute so the pool-cleanup handlers attachSocket added stay alive. */
   private dialListeners: { open: () => void; close: () => void; error: () => void } | undefined
 
@@ -1090,7 +1154,15 @@ class LinkState implements WebSocketLinkHandle {
     }
     void this.resolveToken().then((token) => {
       if (token === undefined) {
-        this.logger.warn(`interconnect: no shared token configured; peer ${this.instanceId} link stays down until one is set`)
+        // Warn once, then keep retrying on the reconnect backoff: a credential
+        // injected after this service activated must bring the link up without
+        // a restart. The dial re-resolves the token on every retry.
+        if (!this.warnedNoToken) {
+          this.warnedNoToken = true
+          this.logger.warn(`interconnect: no shared token configured; peer ${this.instanceId} link stays down, retrying until one is set`)
+        }
+        if (this.closed || epoch !== this.dialEpoch) return
+        this.scheduleReconnect()
         return
       }
       if (this.closed || epoch !== this.dialEpoch) return
