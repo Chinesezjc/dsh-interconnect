@@ -523,6 +523,47 @@ for (const [upstreamPath, portedPath] of PATCH_ID_PAIRS) {
 }
 
 /**
+ * The bundle the retirement migration repoints every deployment profile at. The
+ * migration writes this package name into `dsh.profile.bundles`, so a rename
+ * upstream would leave the runbook naming a bundle that does not exist — and
+ * nothing else here would notice, because the other checks compare patch rows
+ * and peers rather than `name`. Both directions are asserted: upstream must still
+ * carry this name and a patch layer, and RELEASING.md must still name it, so the
+ * constant, the upstream package, and the runbook cannot drift apart.
+ */
+const PROFILE_BUNDLE = {
+  path: 'packages/experimental/interconnect-profile/package.json',
+  name: '@deepseek-ai/dsh-experimental-interconnect-profile',
+  patch: './cordis.patch.yml',
+  documentedIn: 'RELEASING.md',
+}
+
+{
+  const manifest = JSON.parse(upstreamBlob(PROFILE_BUNDLE.path))
+  const patch = manifest.dsh?.bundle?.patch
+  const runbook = readFileSync(join(ROOT, PROFILE_BUNDLE.documentedIn), 'utf8')
+  const problems = []
+  if (manifest.name !== PROFILE_BUNDLE.name) {
+    problems.push(`upstream name is ${String(manifest.name)}, the migration names ${PROFILE_BUNDLE.name}`)
+  }
+  if (patch !== PROFILE_BUNDLE.patch) {
+    problems.push(`bundle patch is ${String(patch)}, expected ${PROFILE_BUNDLE.patch}`)
+  }
+  if (!runbook.includes(PROFILE_BUNDLE.name)) {
+    problems.push(`${PROFILE_BUNDLE.documentedIn} does not name ${PROFILE_BUNDLE.name}`)
+  }
+  if (problems.length === 0) {
+    process.stdout.write(`ok    ${PROFILE_BUNDLE.path} (migration bundle ${PROFILE_BUNDLE.name} with patch ${PROFILE_BUNDLE.patch})\n`)
+  } else {
+    failed = true
+    process.stdout.write(
+      `DRIFT ${PROFILE_BUNDLE.path}: the retirement migration would name the wrong bundle\n`
+      + problems.map(problem => `  - ${problem}\n`).join(''),
+    )
+  }
+}
+
+/**
  * Manifests whose `peerDependenciesMeta` must agree. Marking a peer optional is
  * install-visible: a deployment without that peer still installs the plugin
  * instead of failing peer resolution, so a hand-copied manifest can silently
@@ -605,4 +646,4 @@ if (failed) {
   process.stdout.write(`\nbehavioural drift against ${REF} (${SHORT}) in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift and no unrecorded text drift against ${REF} (${SHORT}) across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)
+process.stdout.write(`\nno behavioural drift and no unrecorded text drift against ${REF} (${SHORT}) across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, 1 migration bundle, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)

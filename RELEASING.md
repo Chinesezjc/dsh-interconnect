@@ -10,7 +10,7 @@
 node scripts/check-upstream-alignment.mjs --ref <上游 head sha>
 ```
 
-默认读取 `~/dsh-wt-ic-merge` 工作区。开头会打印**解析到的提交**（`comparing this mirror against <ref> (<sha>)`）：`--ref` 可以给分支名，而分支在该工作区里的新鲜度只取决于上次 fetch，所以要拿这个 sha 与远端 head 对一下，别把「工作区还没 fetch」读成「上游没动」。工作区里取不到该提交时脚本以 exit 2 停止，不会给结论。指向**不含上游包**的 ref（例如未合入时的 `origin/master`）也 exit 2 并指出缺哪个文件——这正是「合并落地了吗」这个问题的答案。它检查六类不变量：
+默认读取 `~/dsh-wt-ic-merge` 工作区。开头会打印**解析到的提交**（`comparing this mirror against <ref> (<sha>)`）：`--ref` 可以给分支名，而分支在该工作区里的新鲜度只取决于上次 fetch，所以要拿这个 sha 与远端 head 对一下，别把「工作区还没 fetch」读成「上游没动」。工作区里取不到该提交时脚本以 exit 2 停止，不会给结论。指向**不含上游包**的 ref（例如未合入时的 `origin/master`）也 exit 2 并指出缺哪个文件——这正是「合并落地了吗」这个问题的答案。它检查七类不变量：
 
 1. **四个源文件 + 三个 spec**：剥掉注释与 import 行后的骨架必须逐行一致（`ok … (skeleton identical)`）。
 2. **同一批文件的原始文本（注释计入）**：除脚本里 `RAW_ADAPTATIONS` 记录在案的适配行以外，必须逐字一致（`ok … (raw text matches … outside N recorded adaptations)`）。注释与代码一样从上游逐字移植，所以「上游改了注释、本仓只移植了一部分」会在这里判红 —— 骨架那一遍剥掉注释，看不见这种漂移。该遍按**出现次数**比较（不是集合）并忽略空行；`index.ts` 里本仓独有的镜像块（子代理归属判定与 `assertNever`）由锚点整段排除，锚点找不到就判红而不是静默跳过。
@@ -18,9 +18,10 @@ node scripts/check-upstream-alignment.mjs --ref <上游 head sha>
 4. **`cordis.patch.yml` 的插入行**：行 id 与每行 `config` 的键必须与上游 `interconnect-profile` 层一致（部署 profile 按行 id 覆盖 `instanceId`/`peers`）。
 5. **`peerDependenciesMeta`**：必须与上游`packages/experimental/interconnect/package.json` 的那张表完全一致（把某个 peer 标成可选是安装可见行为）。
 6. **peer 子集**：上游声明的每个 peer 都必须出现在本仓 `package.json` 的 peers 里（只断言 `上游 ⊆ 本仓`；本仓 peer 更多是设计使然 —— 它镜像两个 util 包而不依赖它们，并把上游的 dependency 当 peer 声明）。
+7. **迁移要写的 bundle 名**：上游 `packages/experimental/interconnect-profile/package.json` 的 `name` 必须仍是 `@deepseek-ai/dsh-experimental-interconnect-profile`、且它声明 `dsh.bundle.patch: ./cordis.patch.yml`，**同时本文件里也必须仍出现这个名字**。三个条件一起断言，是为了让「上游包名」「门禁里的常量」「迁移手册」不能各自漂走：迁移那天写进 `dsh.profile.bundles` 的就是这个名字，上游一改名手册就会指向不存在的 bundle，而其余检查（比 patch 行、比 peer）都看不见 `name`。
 
 脚本判红的任何差异都是漂移，应当移植而不是调整脚本 —— 除非确实新增了一处适配点（见下节），那就把该行按上游/本仓两侧原文加进 `RAW_ADAPTATIONS`。汇总行会打印各集合的条数，例如
-`no behavioural drift and no unrecorded text drift against <sha> across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`。
+`no behavioural drift and no unrecorded text drift against <sha> across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, 1 migration bundle, and 1 peer subset`。
 
 新增检查时**必须构造负例**（删掉被守护的东西，确认脚本红并 exit 1，再还原）—— 没有负例的检查可能只是给失效机制盖绿章。
 
