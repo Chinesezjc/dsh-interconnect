@@ -325,6 +325,23 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
   }
 }
 
+/** A raw frame a fixture peer recorded, narrowed to the one field these waits read. */
+interface RecordedFrame {
+  readonly type?: string
+}
+
+/**
+ * Resolve once a raw peer recorded this service's `hello`. The dial sends it as
+ * soon as the socket opens, so receiving it proves the link is open — the
+ * readiness gate for a peer that does not answer `query`, which `awaitLink`
+ * needs to answer.
+ * @param frames - frame log the raw peer appends to.
+ * @param timeoutMs - the readiness budget before the wait gives up.
+ */
+async function awaitRawHello(frames: RecordedFrame[], timeoutMs = 5000): Promise<void> {
+  await waitUntil(() => frames.some(frame => frame.type === 'hello'), timeoutMs)
+}
+
 /**
  * Resolve once `instanceId`'s outbound link has completed its handshake. A
  * `ping` answers only over a writable link, and frames on one socket arrive in
@@ -341,6 +358,16 @@ async function awaitLink(service: InterconnectService, instanceId: string, timeo
 }
 
 describe('interconnect host half', () => {
+  it('resolves the documented config defaults for a composition that omits them', () => {
+    expect(InterconnectService.Config({})).toEqual({
+      instanceId: 'dsh',
+      requestTimeoutMs: 10_000,
+      peers: {},
+      delivery: 'followup',
+      allowResume: true,
+    })
+  })
+
   it('registers the /interconnect/link upgrade route and removes it with the fiber', async () => {
     const { upgrades, dispose } = await mounted('secret')
     expect(upgrades).toHaveLength(1)
@@ -378,6 +405,10 @@ describe('interconnect over real WS links', () => {
     linkRoute(ctx.interconnect, 'peer-dead', 'http://127.0.0.1:1')
     await expect(awaitLink(ctx.interconnect, 'peer-dead', 300)).rejects.toThrow('waitUntil timed out after 300ms')
     await dispose()
+  })
+
+  it('refuses to report a raw peer ready before its hello arrives', async () => {
+    await expect(awaitRawHello([], 200)).rejects.toThrow('waitUntil timed out after 200ms')
   })
 
   it('links a configured peer automatically and delivers a send over the link', async () => {
@@ -1048,11 +1079,13 @@ describe('interconnect delivery modes and wake', () => {
       await awaitLink(sender.ctx.interconnect, 'inst-big-recv')
       // The accepted and refused texts are adjacent, so the pair pins the cap
       // byte-exactly instead of leaving slack. With an empty text and the same
-      // `m<counter>-<uuid>` request id length, this placeholder carries only
-      // the fixed fields every send frame adds around the text. The one-digit
-      // counter holds because this sender mints at most three request ids (the
-      // readiness ping and the two sends); a case that adds requests in front of
-      // these would need the matching digit count here.
+      // `<kind><counter>-<uuid>` request id length, this placeholder carries
+      // only the fixed fields every send frame adds around the text. Four ids
+      // are minted before the last assertion below — `q1` for the readiness
+      // ping, one per send, and one for the send the service refuses locally
+      // (the id is minted before the size check) — so the counter stays one
+      // digit. A case that adds requests in front of these needs the matching
+      // digit count here.
       const frameOverhead = ((): number => {
         const placeholder: LinkFrame = {
           type: 'msg',
@@ -1986,6 +2019,17 @@ describe('interconnect outbound reply timeouts', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
+    const frames: RecordedFrame[] = []
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        frames.push(JSON.parse(text) as RecordedFrame)
+      })
+    })
     const receiver = await mounted('secret', new Set(['recv-sess']), { 'inst-send': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
       // Record a sender for the local session, then reply over the silent link.
@@ -1995,9 +2039,12 @@ describe('interconnect outbound reply timeouts', () => {
         text: 'hi',
         sender: { instanceId: 'inst-send', sessionId: 'send-sess' },
       })
-      await wait(250)
+      await awaitRawHello(frames)
       const result = await receiver.ctx.interconnect.reply({ sessionId: 'recv-sess', text: 'back' })
       expect(result).toEqual({ delivered: false, instance: 'inst-send', reason: 'unreachable' })
+      // The reply was written and stayed unanswered, which is the outcome this
+      // case pins; a closed link would report the same reason without one.
+      expect(frames.filter(frame => frame.type === 'msg')).toHaveLength(1)
     } finally {
       await receiver.dispose()
       await new Promise<void>((resolve, reject) => {
@@ -2012,15 +2059,29 @@ describe('interconnect outbound timeouts', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
+    const frames: RecordedFrame[] = []
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        frames.push(JSON.parse(text) as RecordedFrame)
+      })
+    })
     const sender = await mounted('secret', new Set([]), { 'silent-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250) // link opens; the raw server never answers frames
+      await awaitRawHello(frames)
       const result = await sender.ctx.interconnect.send({
         instanceId: 'silent-peer',
         sessionId: 'R-sess',
         text: 'hello?',
       })
       expect(result).toEqual({ delivered: false, instance: 'silent-peer', reason: 'unreachable' })
+      // The send reached the peer and waited out its request timeout; an
+      // unopened link would report the same reason with no frame written.
+      expect(frames.filter(frame => frame.type === 'msg')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await new Promise<void>((resolve, reject) => {
@@ -2222,9 +2283,17 @@ describe('interconnect frame field defaults', () => {
 
 describe('interconnect query-result answer validation', () => {
   /** Raw server answering every inbound query frame with one canned result. */
-  async function answeringPeer(answer: Record<string, unknown>): Promise<{ port: number; close: () => Promise<void> }> {
+  interface AnsweringPeer {
+    readonly port: number
+    readonly close: () => Promise<void>
+    /** Every frame the peer received, including the dial's `hello`. */
+    readonly frames: RecordedFrame[]
+  }
+
+  async function answeringPeer(answer: Record<string, unknown>): Promise<AnsweringPeer> {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
+    const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
         const text = Array.isArray(data)
@@ -2233,6 +2302,7 @@ describe('interconnect query-result answer validation', () => {
             ? data.toString('utf8')
             : Buffer.from(data).toString('utf8')
         const frame = JSON.parse(text) as { type: string; reqId: string }
+        frames.push(frame)
         if (frame.type === 'query') {
           socket.send(JSON.stringify({ type: 'query-result', reqId: frame.reqId, result: answer }))
         }
@@ -2241,6 +2311,7 @@ describe('interconnect query-result answer validation', () => {
     const address = wss.address() as AddressInfo
     return {
       port: address.port,
+      frames,
       close: () => new Promise<void>((resolve, reject) => {
         wss.close((error) => { if (error === undefined) resolve(); else reject(error) })
       }),
@@ -2251,9 +2322,13 @@ describe('interconnect query-result answer validation', () => {
     const peer = await answeringPeer({ pong: true, instance: 'liar' })
     const sender = await mounted('secret', new Set([]), { 'lying-peer': `http://127.0.0.1:${String(peer.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250)
+      // The recorded hello proves the dial completed: without it `undefined`
+      // would come from a link that never opened, not from the projector
+      // rejecting this peer's wrong-shaped answer.
+      await awaitRawHello(peer.frames)
       const result = await sender.ctx.interconnect.list('lying-peer')
       expect(result).toBeUndefined()
+      expect(peer.frames.filter(frame => frame.type === 'query')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await peer.close()
@@ -2264,9 +2339,13 @@ describe('interconnect query-result answer validation', () => {
     const peer = await answeringPeer({ instance: 'liar', sessions: [] })
     const sender = await mounted('secret', new Set([]), { 'lying-peer': `http://127.0.0.1:${String(peer.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250)
+      // The recorded hello proves the dial completed: without it `undefined`
+      // would come from a link that never opened, not from the projector
+      // rejecting this peer's wrong-shaped answer.
+      await awaitRawHello(peer.frames)
       const result = await sender.ctx.interconnect.ping('lying-peer')
       expect(result).toBeUndefined()
+      expect(peer.frames.filter(frame => frame.type === 'query')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await peer.close()
@@ -2280,9 +2359,13 @@ describe('interconnect query-result answer validation', () => {
     const peer = await answeringPeer({ pong: true, instance: 'liar', sessions: [null] })
     const sender = await mounted('secret', new Set([]), { 'lying-peer': `http://127.0.0.1:${String(peer.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250)
+      // The recorded hello proves the dial completed: without it `undefined`
+      // would come from a link that never opened, not from the projector
+      // rejecting this peer's wrong-shaped answer.
+      await awaitRawHello(peer.frames)
       const result = await sender.ctx.interconnect.list('lying-peer')
       expect(result).toBeUndefined()
+      expect(peer.frames.filter(frame => frame.type === 'query')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await peer.close()
@@ -2293,9 +2376,13 @@ describe('interconnect query-result answer validation', () => {
     const peer = await answeringPeer({ instance: 'x' })
     const sender = await mounted('secret', new Set([]), { 'lying-peer': `http://127.0.0.1:${String(peer.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250)
+      // The recorded hello proves the dial completed: without it `undefined`
+      // would come from a link that never opened, not from the projector
+      // rejecting this peer's wrong-shaped answer.
+      await awaitRawHello(peer.frames)
       const result = await sender.ctx.interconnect.list('lying-peer')
       expect(result).toBeUndefined()
+      expect(peer.frames.filter(frame => frame.type === 'query')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await peer.close()
@@ -2306,11 +2393,23 @@ describe('interconnect query-result answer validation', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
+    const frames: RecordedFrame[] = []
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        frames.push(JSON.parse(text) as RecordedFrame)
+      })
+    })
     const sender = await mounted('secret', new Set([]), { 'silent-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250)
+      await awaitRawHello(frames)
       const result = await sender.ctx.interconnect.ping('silent-peer')
       expect(result).toBeUndefined()
+      expect(frames.filter(frame => frame.type === 'query')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await new Promise<void>((resolve, reject) => {
@@ -2323,11 +2422,24 @@ describe('interconnect query-result answer validation', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
+    const frames: RecordedFrame[] = []
+    wss.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : Buffer.isBuffer(data)
+            ? data.toString('utf8')
+            : Buffer.from(data).toString('utf8')
+        frames.push(JSON.parse(text) as RecordedFrame)
+      })
+    })
     const sender = await mounted('secret', new Set([]), { 'silent-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 10000 })
     try {
-      await wait(250) // link opens; the raw server never answers frames
+      await awaitRawHello(frames)
       const sendPromise = sender.ctx.interconnect.send({ instanceId: 'silent-peer', sessionId: 'R-sess', text: 'hello?' })
-      await wait(50)
+      // The peer holds the frame unanswered, so this is the in-flight state the
+      // dispose below has to settle — not a send that never left.
+      await waitUntil(() => frames.some(frame => frame.type === 'msg'))
       await sender.dispose()
       const result = await sendPromise
       expect(result).toEqual({ delivered: false, instance: 'silent-peer', reason: 'unreachable' })
@@ -2446,6 +2558,7 @@ describe('interconnect result frame typing', () => {
   it('does not settle a query with a mis-typed msg-result frame', async () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
+    const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
         const text = Array.isArray(data)
@@ -2454,6 +2567,7 @@ describe('interconnect result frame typing', () => {
             ? data.toString('utf8')
             : Buffer.from(data).toString('utf8')
         const frame = JSON.parse(text) as { type: string; reqId: string }
+        frames.push(frame)
         if (frame.type === 'query') {
           // Answer the query with the WRONG frame type; the pending must not
           // be settled by it, so the list call times out to undefined.
@@ -2464,9 +2578,12 @@ describe('interconnect result frame typing', () => {
     const address = wss.address() as AddressInfo
     const sender = await mounted('secret', new Set([]), { 'mis-typing-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
-      await wait(250)
+      await awaitRawHello(frames)
       const result = await sender.ctx.interconnect.list('mis-typing-peer')
       expect(result).toBeUndefined()
+      // The wrong frame type is what left the pending unsettled: the query
+      // really went out and really was answered, just not in kind.
+      expect(frames.filter(frame => frame.type === 'query')).toHaveLength(1)
     } finally {
       await sender.dispose()
       await new Promise<void>((resolve, reject) => {
@@ -2481,6 +2598,7 @@ describe('interconnect explicit null wire fields', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
+    const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
         const text = Array.isArray(data)
@@ -2489,6 +2607,7 @@ describe('interconnect explicit null wire fields', () => {
             ? data.toString('utf8')
             : Buffer.from(data).toString('utf8')
         const frame = JSON.parse(text) as { type: string; reqId: string }
+        frames.push(frame)
         // A peer written against JSON's absent-value convention sends `null`
         // for a field it has no value for instead of omitting the key.
         if (frame.type === 'msg') {
@@ -2508,7 +2627,9 @@ describe('interconnect explicit null wire fields', () => {
     })
     const sender = await mounted('secret', new Set([]), { 'null-peer': `http://127.0.0.1:${String(address.port)}` })
     try {
-      await wait(250) // link opens before either request goes out
+      // This peer answers neither `query` shape, so `awaitLink`'s ping cannot
+      // report readiness; its receipt of the dial's hello can.
+      await awaitRawHello(frames)
       expect(await sender.ctx.interconnect.send({ instanceId: 'null-peer', sessionId: 'peer-sess', text: 'hi' }))
         .toEqual({ delivered: true, instance: 'null-peer' })
       expect(await sender.ctx.interconnect.list('null-peer'))
@@ -2525,6 +2646,7 @@ describe('interconnect explicit null wire fields', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
+    const frames: RecordedFrame[] = []
     let answered = 0
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
@@ -2534,6 +2656,7 @@ describe('interconnect explicit null wire fields', () => {
             ? data.toString('utf8')
             : Buffer.from(data).toString('utf8')
         const frame = JSON.parse(text) as { type: string; reqId: string }
+        frames.push(frame)
         if (frame.type !== 'msg') return
         answered += 1
         // The failure branch keeps whatever the success branch's `delivery`
@@ -2547,7 +2670,9 @@ describe('interconnect explicit null wire fields', () => {
     })
     const sender = await mounted('secret', new Set([]), { 'stray-peer': `http://127.0.0.1:${String(address.port)}` })
     try {
-      await wait(250) // link opens before either request goes out
+      // This peer answers only `msg`, so readiness comes from its receipt of
+      // the dial's hello rather than from a `ping` it would leave unanswered.
+      await awaitRawHello(frames)
       expect(await sender.ctx.interconnect.send({ instanceId: 'stray-peer', sessionId: 'peer-sess', text: 'first' }))
         .toEqual({ delivered: false, instance: 'stray-peer', reason: 'unreachable' })
       expect(await sender.ctx.interconnect.send({ instanceId: 'stray-peer', sessionId: 'peer-sess', text: 'second' }))
@@ -2590,7 +2715,7 @@ describe('interconnect explicit null wire fields', () => {
     })
     const sender = await mounted('secret', new Set([]), { 'stray-peer': `http://127.0.0.1:${String(address.port)}` })
     try {
-      await wait(250) // link opens before either request goes out
+      await awaitLink(sender.ctx.interconnect, 'stray-peer')
       expect(await sender.ctx.interconnect.ping('stray-peer')).toEqual({ pong: true, instance: 'stray-peer' })
       expect(await sender.ctx.interconnect.list('stray-peer'))
         .toEqual({ instance: 'stray-peer', sessions: [{ sessionId: 'peer-sess', title: 'T', status: 'idle' }] })

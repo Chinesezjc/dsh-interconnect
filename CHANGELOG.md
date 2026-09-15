@@ -2,6 +2,25 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.22（2026-09-15）
+
+跟随 #3243 分支新 head（`01bb1b397e`）：让组合可以省略带 schema 默认值的 `Config` 字段。
+
+### 变更
+
+- **`Config` 的 `instanceId` 与 `requestTimeoutMs` 改为可选**：两个字段的 schema 都带 `.default(...)`（`'dsh'` / `10000`），但接口把它们声明成必填，与同处另外三个同样带默认值的字段（`peers?`/`delivery?`/`allowResume?`）不一致。现在改为 `readonly instanceId?: string` / `readonly requestTimeoutMs?: number`，并按仓库约定补 `@default 'dsh'` / `@default 10000`。
+- **默认值提为模块常量**：新增 `DEFAULT_INSTANCE_ID = 'dsh'` 与 `DEFAULT_REQUEST_TIMEOUT_MS = 10_000`，schema 的 `.default(...)` 与构造器共用它们，避免同一字面量写两遍。
+- **构造器补 `??` 兜底**：`this.instanceId = config.instanceId ?? DEFAULT_INSTANCE_ID`（timeout 同理），并照同处既有样式补 `/* v8 ignore next 1 */` —— schema 总在构造器运行前填好默认值，所以这个分支运行时不可达；补注释是为了让 monorepo 的 per-file 覆盖门禁不因死分支变红。
+- **行为与 0.11.21 相同**：这是类型与接线的一致性修复，`??` 是死分支。发版是为了让已发布产物的构建输出与上游保持一致，而不是修一个运行时可观察的缺陷。
+- **同 head 的另一个 commit 改了链路用例**（`8a21697806`）：`interconnect.host.spec.ts` 的用例改为按协议等 `ping`/`hello` 应答，不再用固定延迟，并新增一条「hello 未到不得报告 ready」的用例。`bb56bb0a37`（snapshot 助手）、`01bb1b397e`（doc graph 脚本）与各 `docs/**` 都是 monorepo 独有，不在镜像范围内。
+
+### 验证
+
+- `pnpm run check`（typecheck + 170/170 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against 01bb1b397e across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`；`scripts/port-upstream-change.mjs --from 4a335855 --to 01bb1b397e` 一次完成，**0 个被拒 hunk**。
+- 构建产物与 0.11.21 比对：**4 个变**（`lib/index.js` `fa8f72b78e1d14b0`→`34dfba7d603e1787`、`lib/interconnect/index.js` `946fa483e8ed1b8c`→`976081ad8f7906b4`、`lib/tool-interconnect/index.js` `2353740801733d92`→`e3cf1a069d165b8c`、`lib/types/interconnect/types.d.ts` `4814ed410b65d7e0`→`33956ef458ccb9a8`），skill/asset/patch 不变。这 4 个新值在发版前一轮已用等价预演（`git apply` 未推改动）提前测出并**逐字命中** —— 预演只差了 spec 的写法，而没有 spec 不参与构建。
+- 部署影响：三台（MomoiAiri、CI-Server、CI-Server-Windows）从 0.11.21 升到 0.11.22。
+
 ## 0.11.21（2026-09-15）
 
 跟随 #3243 分支新 head（`03fb844ea1`）：companion skill 不再声明 `resourceBase`，因为它会把本机绝对路径写进 skill 工具结果。

@@ -112,6 +112,10 @@ const PLUGIN_SOURCE = 'dsh-interconnect'
 
 /** Maximum inbound link-frame size in bytes; larger frames are dropped as protocol violations. */
 const MAX_LINK_FRAME_BYTES = 1024 * 1024
+/** Instance id a composition that omits `instanceId` runs under. */
+const DEFAULT_INSTANCE_ID = 'dsh'
+/** Outbound request timeout a composition that omits `requestTimeoutMs` runs with. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 /** Handshake window for an outbound dial; a CONNECTING socket past this is terminated and re-dialed. */
 const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
 /** WebSocket upgrade pathname owning the persistent peer link. */
@@ -339,8 +343,8 @@ const linkFrameSchema = z.union([
 export class InterconnectService extends Service {
   static inject = ['agents', 'credentials']
   static Config: z<Config> = z.object({
-    instanceId: z.string().max(MAX_INSTANCE_ID_CHARS).default('dsh'),
-    requestTimeoutMs: z.natural().max(60000).default(10000),
+    instanceId: z.string().max(MAX_INSTANCE_ID_CHARS).default(DEFAULT_INSTANCE_ID),
+    requestTimeoutMs: z.natural().max(60000).default(DEFAULT_REQUEST_TIMEOUT_MS),
     peers: z.dict(z.string()).default({}),
     delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]).default('followup'),
     allowResume: z.boolean().default(true),
@@ -371,8 +375,10 @@ export class InterconnectService extends Service {
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'interconnect')
-    this.instanceId = config.instanceId
-    this.requestTimeoutMs = config.requestTimeoutMs
+    /* v8 ignore next 1 -- the Config schema applies its instanceId default before the constructor runs. */
+    this.instanceId = config.instanceId ?? DEFAULT_INSTANCE_ID
+    /* v8 ignore next 1 -- the Config schema applies its requestTimeoutMs default before the constructor runs. */
+    this.requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     /* v8 ignore next 1 -- the Config schema applies its delivery default before the constructor runs. */
     this.delivery = config.delivery ?? 'followup'
     /* v8 ignore next 1 -- the Config schema applies its allowResume default before the constructor runs. */

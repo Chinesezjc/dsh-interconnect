@@ -276,10 +276,11 @@ export interface Config {
    * open dialed link already covers is skipped, so two instances sharing one id
    * receive events only over the link this instance dials; with no dialed link
    * for that id both receive them and the sender's peer sees every event twice.
+   * @default 'dsh'
    */
-  readonly instanceId: string
-  /** Request timeout for outbound deliveries, in milliseconds. */
-  readonly requestTimeoutMs: number
+  readonly instanceId?: string
+  /** Request timeout for outbound deliveries, in milliseconds. @default 10000 */
+  readonly requestTimeoutMs?: number
   /**
    * Peer instance routes, keyed by the peer's `instanceId`, valued by the
    * origin this instance dials to reach that peer (e.g. a tunnel endpoint
