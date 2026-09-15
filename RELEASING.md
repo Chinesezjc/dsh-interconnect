@@ -123,6 +123,15 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 
 ### 部署后的互联链路检查
 
+Linux 宿主用一条命令跑完下面全部检查（版本、profile 层、`/` 与 `/interconnect/link`、五帧、可选跨腿、产物 hash 链）：
+
+```sh
+scripts/verify-deployment.sh CI-Server 3080 /home/ubuntu/deepseek-harness/node_modules/.pnpm/ws@8.21.0/node_modules/ws 13081
+# 参数：<ssh 别名> <本机端口> <该机 ws 包路径> [<跨腿端口>]
+```
+
+输出每项一条 `PASS/FAIL`，任一项失败退出码非零（实测：把端口写错 → `GET / -> 000`、`WS … -> 000`、探针 `ECONNREFUSED` 三条 FAIL、exit 1）。Windows 无 POSIX shell，仍需按本文档的 `powershell -EncodedCommand` 路径逐项做。下面是这些检查的逐条说明（脚本即按此实现）：
+
 升级或改动隧道之后，除了逐台自检，还要确认**三向互联**：服务向某个 peer 发送需要一条**拨号（出站）链路**，只看到对端拨入并不代表本机具备发送能力。
 
 1. **逐台自检**：`GET /` 得 401、`/interconnect/link` 无 token 得 401（注意重启后可能先返回 404，见坑一），再跑一次 `scripts/probe-deployed-link.cjs` 五帧。
