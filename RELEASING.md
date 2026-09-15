@@ -104,6 +104,14 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 3. **`NRestarts` 是累计值，不代表"现在是否在重启"**：`systemctl show <unit> -p NRestarts --value` 可能是六位数（长期 flapping 的历史累计，实测 184245）。判据是**相隔约 20 秒取两次、数值不变且 `is-active=active`**。
 4. **穿透验证**（比 TCP 转发更有说服力）：在任一台用本机凭证里的 token，对**下一跳的隧道端口**跑探测脚本——`IC_PORT=13081`（→ ci-windows）、`19001`（→ momoairi）、`13080`（→ ci-server），期望各自的 `hello from: <instanceId>`；六条有向腿都应通过。
 5. **链路曾两端都断过时，要重启失去链路那一侧的实例**（`sudo -n systemctl restart dsh-web` / Windows 计划任务 Stop+Start），否则它只保留对端拨入，自己要等重连退避才会重新拨号。
+6. **已装包的关键文件要与仓库逐字节一致**（`assets/dsh-interconnect.md` 是 skill 正文、`cordis.patch.yml` 是挂载层；缺失或漂移会**静默**少掉模型可见内容/改动挂载行，光看版本号发现不了）：
+   ```sh
+   d=$DSH_HOME/profiles/web/node_modules/dsh-interconnect
+   shasum -a 256 "$d/assets/dsh-interconnect.md" "$d/cordis.patch.yml" "$d/dsh.plugin.json"   # macOS
+   sha256sum "$d/assets/dsh-interconnect.md" "$d/cordis.patch.yml" "$d/dsh.plugin.json"      # Linux
+   # Windows: Get-FileHash <path> -Algorithm SHA256
+   ```
+   与仓库里同名文件的 hash 比对；`dsh.plugin.json` 的 hash 同时证明已装版本就是当前仓库版本。
 
 ### 坑二：devDependency 不能写本机路径
 
