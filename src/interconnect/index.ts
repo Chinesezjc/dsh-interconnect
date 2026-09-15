@@ -302,6 +302,7 @@ const querySchema = z.union([
 ])
 
 /** Wire shape of one `send` answer: success carries the mode used, failure must carry the reason. */
+/** Reasons one receiver can answer a `msg` with; the reply-side reasons stay local. */
 const msgResultSchema = z.union([
   z.object({ delivered: z.const(true).required(), instance: z.string().required(), delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]) }),
   z.object({ delivered: z.const(false).required(), instance: z.string().required(), reason: z.union([
@@ -310,7 +311,6 @@ const msgResultSchema = z.union([
     z.const('resume-refused'),
     z.const('resume-failed'),
     z.const('session-owned-by-subagent'),
-    z.const('no-sender-known'),
   ]).required() }),
 ])
 

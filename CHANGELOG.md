@@ -2,6 +2,21 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.20（2026-09-15）
+
+跟随 #3243 分支新 head（`0454d30ab5fb`）：把 `no-sender-known` 从「接收方可以回答的线缆原因」里删掉，与 0.11.19 补的文档保持一致。
+
+### 变更
+
+- **`msgResultSchema` 不再接受 `no-sender-known`**：该联合类型里去掉 `z.const('no-sender-known')`。0.11.19 刚把「`message-too-large` 与 `no-sender-known` 是本实例本地产生、永远不过线」写进 `SendFailure` 的文档，但 schema 当时仍允许接收方回一个 `no-sender-known`；现在入站帧里出现这个原因会被判为 malformed（丢弃并按既有 `dropping malformed link frame` 记账），文档与线缆契约对齐。
+- **同一处多了一行 JSDoc**：`msgResultSchema` 上方新增「Reasons one receiver can answer a `msg` with; the reply-side reasons stay local.」（上游把新注释加在原有注释之后，两行连排；按上游原文逐字移植，未整理）。
+
+### 验证
+
+- `pnpm run check`（typecheck + 167/167 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against 0454d30ab5 across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`；用 `scripts/port-upstream-change.mjs --from ce0d15780c --to 0454d30ab5` 一次完成，无被拒 hunk。
+- 部署影响：三台升级直接跳到 0.11.20（MomoiAiri 从 0.11.19、CI-Server 与 Windows 从 0.11.18），不再单独铺 0.11.19，避免同一台机连着升两次。
+
 ## 0.11.19（2026-09-15）
 
 跟随 #3243 分支新 head（`ce0d15780c03`）：skill 正文的身份来源规则改写，并补齐 0.11.18 之后上游写下的 JSDoc。
