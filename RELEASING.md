@@ -102,6 +102,13 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 
 换版本之所以能用裸 `pnpm add`，是因为 bundle 名早先已由 `dsh plugin add` 写进列表、且这一次名字没变。迁移到别的包时（例如换 `@deepseek-ai/dsh-experimental-interconnect-profile`）列表本身要改，必须用 `dsh plugin --profile web remove <旧包>` / `add <新包>`。
 
+**`dsh plugin ... remove` 也要带 `--config.minimumReleaseAge=0`**（当要删的版本发布不足 24 小时；与「坑三」同一个门禁）。实测（本机 scratch profile，2026-09-15）：
+1. `dsh plugin --profile web add dsh-interconnect@0.11.20 …` → `dependencies` 与 `dsh.profile.bundles` **同时**新增（对账生效）；
+2. 不带该 flag 直接 `remove` → pnpm 报 *"The lockfile contains entries that the active policies reject"* 并失败，**但 `node_modules/dsh-interconnect` 已被删掉** → profile 处于「依赖还写着、bundle 还列着、包却不在」的悬空态，随后 `--dump-config` 直接 `Error: dsh: cannot resolve profile bundle "dsh-interconnect" from the dsh installation or <profile>`（这就是它能致启动失败的直接证据）；
+3. 加上 `--config.minimumReleaseAge=0` 重跑 → pnpm 成功，**依赖与 bundle 列表项一并消失**，`--dump-config` 恢复正常。
+   注：这个 scratch profile 的 `pnpm-workspace.yaml` 必须含 `autoInstallPeers: false`，否则 pnpm 会去 registry 拉 `@deepseek-ai/*` 那些未发布的 peer（报 `@deepseek-ai/dsh-type-meta is not in the npm registry`）；宿主上的 profile 自带该设置。
+   若 `remove` 中途失败留下了悬空态，补救是 `dsh plugin --profile web install`（错误信息里给的也正是这条）或把包装回来。
+
 ### 坑一：镜像滞后与重启的两处现实约束
 
 - **`dsh plugin ... add` 不转发 `--registry`**：实测把 `--registry=https://registry.npmjs.org` 写在 `dsh plugin` 后面时 pnpm 仍查 `mirrors.tencentyun.com`，报「The latest release of dsh-interconnect is <上一个版本>」（发布后几分钟内镜像还没同步）。**可靠做法**是在 profile 目录直接 `pnpm add`，`--registry` 才会生效。
