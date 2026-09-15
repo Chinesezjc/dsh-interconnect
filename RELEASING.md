@@ -122,7 +122,8 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
    shasum -a 256 …                                                                        # macOS
    # Windows: Get-FileHash <path> -Algorithm SHA256
    ```
-   与本仓 `pnpm run check` 产物、`assets/`、`cordis.patch.yml`、`dsh.plugin.json` 的 hash 逐个比对。构建是确定性的，因此**同一版本下这七个 hash 应在仓库与三台部署上完全一致**；`dsh.plugin.json` 的 hash 同时证明已装版本就是当前仓库版本。实测 0.11.18：`lib/index.js b672b438532ad818`、`lib/interconnect/index.js 62ac01e8cf0865a8`、`lib/tool-interconnect/index.js 2ade00fd00a692e6`、`lib/skill-interconnect/index.js ac7f6b62698c99b2`、`assets/dsh-interconnect.md b4daf02189b15291`、`cordis.patch.yml b324e2a6f00f7515`、`dsh.plugin.json 6855184fc9dfeab9`（前三段为 sha256 前 16 位）。
+   与本仓 `pnpm run check` 产物、`assets/`、`cordis.patch.yml`、`dsh.plugin.json` 的 hash 逐个比对。构建是确定性的，因此**同一版本下这几个 hash 应在仓库与三台部署上完全一致**；`dsh.plugin.json` 的 hash 同时证明已装版本就是当前仓库版本。实测 0.11.18：`lib/index.js b672b438532ad818`、`lib/interconnect/index.js 62ac01e8cf0865a8`、`lib/tool-interconnect/index.js 2ade00fd00a692e6`、`lib/skill-interconnect/index.js ac7f6b62698c99b2`、`assets/dsh-interconnect.md b4daf02189b15291`、`cordis.patch.yml b324e2a6f00f7515`、`dsh.plugin.json 6855184fc9dfeab9`（均为 sha256 前 16 位）。
+   - **例外：发布之后又移植了注释时，`lib/types/**/*.d.ts` 会与已发布包不同**。注释在 JS 产物里被剥掉（`lib/**/index.js` 不变），但会**保留进 `.d.ts`**，所以「只改注释」并非对所有产物都不可见：0.11.18 发布后补的一处 `types.ts` JSDoc 让本仓 `lib/types/interconnect/types.d.ts` 变为 `1d709beb309735d9`，而线上包仍是 `ca4f433ff508fd09`。这不影响运行时与宿主，但下次发版会带上它——比对时先确认「本仓是否在发布后改过源文件」，别把它当成安装损坏。
 
 ### 坑二：devDependency 不能写本机路径
 
