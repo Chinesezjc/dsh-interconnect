@@ -2201,9 +2201,9 @@ describe('interconnect dial and teardown edge paths', () => {
       // Kill the server and its sockets: the sender's link closes and reconnects.
       for (const client of wss.clients) client.terminate()
       await new Promise<void>((resolve) => { wss.close(() => { resolve() }) })
-      // The drop schedules the 1s backoff retry this case is named for: a
-      // re-dial against the dead origin increments the route's retry count,
-      // which a link that simply never opened would never do.
+      // The drop schedules the 1s backoff retry this case is named for: the
+      // dialed socket's close handler bumps the route's retry count as it arms
+      // that timer, which a link that simply never opened would never do.
       await waitUntil(() => routeState(sender.service, 'peer-b').retry > 0)
       const result = await sender.ctx.interconnect.send({ instanceId: 'peer-b', sessionId: 'R-sess', text: 'x' })
       expect(result).toMatchObject({ delivered: false, reason: 'unreachable' })
