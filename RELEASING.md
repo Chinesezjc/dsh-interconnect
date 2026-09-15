@@ -23,6 +23,15 @@ node scripts/check-upstream-alignment.mjs --ref <上游 head sha>
 
 新增检查时**必须构造负例**（删掉被守护的东西，确认脚本红并 exit 1，再还原）—— 没有负例的检查可能只是给失效机制盖绿章。
 
+### 看上游 PR 的未解决线程
+
+```sh
+scripts/pr-threads.sh deepseek-harness/deepseek-harness 3243
+```
+
+**不要用 `reviewThreads(first: 100) { totalCount nodes { isResolved } }` 数线程**：`totalCount` 是全量，`nodes` 只有第一页，未解决线程若落在后续页就会被读成 0。实测 #3243 有 681→686 条线程、5 条未解决**全在第 7 页**，前 100 条里一条都看不到（据此曾误判"线程已归零"）。脚本用 `gh api graphql --paginate` 逐页累加并列出路径/作者/正文摘要。
+另注：这个仓库里**未解决线程并不阻塞合并**——已合并的 #3926 至今仍有 7 条未 resolve 的 bot 线程；阻塞项是必需检查与审批分。
+
 ### 移植
 
 本包是**移植**，不是拷贝。允许且仅允许这些差异：
