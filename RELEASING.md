@@ -109,6 +109,9 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
    注：这个 scratch profile 的 `pnpm-workspace.yaml` 必须含 `autoInstallPeers: false`，否则 pnpm 会去 registry 拉 `@deepseek-ai/*` 那些未发布的 peer（报 `@deepseek-ai/dsh-type-meta is not in the npm registry`）；宿主上的 profile 自带该设置。
    若 `remove` 中途失败留下了悬空态，补救是 `dsh plugin --profile web install`（错误信息里给的也正是这条）或把包装回来。
 
+**要改 profile layer 名单时，首选直接手改 `package.json`**（`dsh.profile.bundles` 换名 + 删旧依赖）→ profile 目录里 `pnpm install --config.minimumReleaseAge=0` → 重启前用 `dsh --profile web --dump-config` 验组合。理由：`reconcilePlugins` 只是把「依赖态」同步进 `bundles`，手改可以完全不依赖它，从而避开上面第 2 步那种「pnpm 失败但包已被删」的部分失败窗口；而手写 `bundles` 的 profile 从 R63 起就用 `--dump-config` 反复验过。
+反过来，**`add` 一个未发布的包是安全失败**：实测 `dsh plugin --profile web add @deepseek-ai/dsh-experimental-interconnect-profile --registry=https://registry.npmjs.org` 报 *"is not in the npm registry, or you have no permission to fetch it"*，profile 完全不变（`dependencies` 仍为 null、`bundles` 仍是原样）——所以换到 monorepo 那个包时不要试图 `add` 它（它不在 npm 上，靠 installation 解析，必须写进 `bundles`）。`add` 失败无害、`remove` 失败有害，这一点决定了路线选择。
+
 ### 坑一：镜像滞后与重启的两处现实约束
 
 - **`dsh plugin ... add` 不转发 `--registry`**：实测把 `--registry=https://registry.npmjs.org` 写在 `dsh plugin` 后面时 pnpm 仍查 `mirrors.tencentyun.com`，报「The latest release of dsh-interconnect is <上一个版本>」（发布后几分钟内镜像还没同步）。**可靠做法**是在 profile 目录直接 `pnpm add`，`--registry` 才会生效。
