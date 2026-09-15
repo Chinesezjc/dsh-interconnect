@@ -15,6 +15,7 @@ import type { Agent, SessionStartSource } from '@deepseek-ai/dsh-agent'
 import InterconnectService, { INTERCONNECT_TOKEN_REF, linkUrl } from '../src/interconnect/index.ts'
 import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'
 import type { LinkFrame } from '../src/interconnect/types.ts'
+import type { RawData } from 'ws'
 import WebSocket, { WebSocketServer } from 'ws'
 
 /** Structural httpServer fake recording the upgrade registries this service touches. */
@@ -299,11 +300,7 @@ async function dial(
   })
   const frames: Record<string, unknown>[] = []
   client.on('message', (data) => {
-    const text = Array.isArray(data)
-      ? Buffer.concat(data).toString('utf8')
-      : Buffer.isBuffer(data)
-        ? data.toString('utf8')
-        : Buffer.from(data).toString('utf8')
+    const text = frameText(data)
     frames.push(JSON.parse(text) as Record<string, unknown>)
   })
   const waitOpen = new Promise<void>((resolve, reject) => {
@@ -323,6 +320,15 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
     if (Date.now() >= deadline) throw new Error(`waitUntil timed out after ${timeoutMs}ms`)
     await wait(intervalMs)
   }
+}
+
+/** One raw ws message payload as its UTF-8 text, whatever shape ws delivered it in. */
+function frameText(data: RawData): string {
+  return Array.isArray(data)
+    ? Buffer.concat(data).toString('utf8')
+    : Buffer.isBuffer(data)
+      ? data.toString('utf8')
+      : Buffer.from(data).toString('utf8')
 }
 
 /** A raw frame a fixture peer recorded, narrowed to the one field these waits read. */
@@ -1082,8 +1088,8 @@ describe('interconnect delivery modes and wake', () => {
       // `<kind><counter>-<uuid>` request id length, this placeholder carries
       // only the fixed fields every send frame adds around the text. Four ids
       // are minted before the last assertion below — `q1` for the readiness
-      // ping, one per send, and one for the send the service refuses locally
-      // (the id is minted before the size check) — so the counter stays one
+      // ping, the two delivered sends, and the send the service refuses locally
+      // (its id is minted before the size check) — so the counter stays one
       // digit. A case that adds requests in front of these needs the matching
       // digit count here.
       const frameOverhead = ((): number => {
@@ -2022,11 +2028,7 @@ describe('interconnect outbound reply timeouts', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         frames.push(JSON.parse(text) as RecordedFrame)
       })
     })
@@ -2062,11 +2064,7 @@ describe('interconnect outbound timeouts', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         frames.push(JSON.parse(text) as RecordedFrame)
       })
     })
@@ -2194,7 +2192,10 @@ describe('interconnect dial and teardown edge paths', () => {
     const address = wss.address() as AddressInfo
     const sender = await mounted('secret', new Set([]), { 'peer-b': `http://127.0.0.1:${String(address.port)}` })
     try {
-      await wait(200) // the link dials and opens against the raw server
+      // The server's own client set is the readiness signal: an unfinished
+      // handshake leaves it empty, and terminating nothing would exercise the
+      // initial-dial failure path instead of the drop this case is about.
+      await waitUntil(() => wss.clients.size === 1)
       // Kill the server and its sockets: the sender's link closes and reconnects.
       for (const client of wss.clients) client.terminate()
       await new Promise<void>((resolve) => { wss.close(() => { resolve() }) })
@@ -2296,11 +2297,7 @@ describe('interconnect query-result answer validation', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         const frame = JSON.parse(text) as { type: string; reqId: string }
         frames.push(frame)
         if (frame.type === 'query') {
@@ -2396,11 +2393,7 @@ describe('interconnect query-result answer validation', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         frames.push(JSON.parse(text) as RecordedFrame)
       })
     })
@@ -2425,11 +2418,7 @@ describe('interconnect query-result answer validation', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         frames.push(JSON.parse(text) as RecordedFrame)
       })
     })
@@ -2561,11 +2550,7 @@ describe('interconnect result frame typing', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         const frame = JSON.parse(text) as { type: string; reqId: string }
         frames.push(frame)
         if (frame.type === 'query') {
@@ -2601,11 +2586,7 @@ describe('interconnect explicit null wire fields', () => {
     const frames: RecordedFrame[] = []
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         const frame = JSON.parse(text) as { type: string; reqId: string }
         frames.push(frame)
         // A peer written against JSON's absent-value convention sends `null`
@@ -2627,8 +2608,9 @@ describe('interconnect explicit null wire fields', () => {
     })
     const sender = await mounted('secret', new Set([]), { 'null-peer': `http://127.0.0.1:${String(address.port)}` })
     try {
-      // This peer answers neither `query` shape, so `awaitLink`'s ping cannot
-      // report readiness; its receipt of the dial's hello can.
+      // This peer answers every query with a list-shaped result, so
+      // `awaitLink`'s ping cannot report readiness — `projectPingResult`
+      // rejects that answer; its receipt of the dial's hello can.
       await awaitRawHello(frames)
       expect(await sender.ctx.interconnect.send({ instanceId: 'null-peer', sessionId: 'peer-sess', text: 'hi' }))
         .toEqual({ delivered: true, instance: 'null-peer' })
@@ -2650,11 +2632,7 @@ describe('interconnect explicit null wire fields', () => {
     let answered = 0
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         const frame = JSON.parse(text) as { type: string; reqId: string }
         frames.push(frame)
         if (frame.type !== 'msg') return
@@ -2691,11 +2669,7 @@ describe('interconnect explicit null wire fields', () => {
     const address = wss.address() as AddressInfo
     wss.on('connection', (socket) => {
       socket.on('message', (data) => {
-        const text = Array.isArray(data)
-          ? Buffer.concat(data).toString('utf8')
-          : Buffer.isBuffer(data)
-            ? data.toString('utf8')
-            : Buffer.from(data).toString('utf8')
+        const text = frameText(data)
         const frame = JSON.parse(text) as { type: string; reqId: string; query?: { kind?: string } }
         if (frame.type !== 'query') return
         // The union merges keys across its branches, so a ping answer can carry
