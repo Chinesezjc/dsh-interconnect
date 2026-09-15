@@ -75,7 +75,7 @@ git -C ~/dsh-wt-ic-merge diff <旧 head> <新 head> -- <上游路径> \
 每个实例的 profile 以 bundle 形式安装本包。升级即在 profile 里换版本、重启服务、回读验证：
 
 ```sh
-# 直接在 profile 目录里换版本（见坑四：`dsh plugin add` 不会把 --registry 转给 pnpm）
+# 直接在 profile 目录里换版本（见坑一：`dsh plugin add` 不会把 --registry 转给 pnpm）
 cd $DSH_HOME/profiles/web
 pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --config.minimumReleaseAge=0
 # 然后重启该实例的 DSH（systemd 或计划任务），并回读：
@@ -86,7 +86,7 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 
 `dsh plugin --profile web add` 仍可用（它会顺带按安装态对账 `dsh.profile.bundles`），但只换版本时直接 `pnpm add` 更可靠，且不依赖 checkout 可运行。
 
-### 坑四：镜像滞后与重启的两处现实约束
+### 坑一：镜像滞后与重启的两处现实约束
 
 - **`dsh plugin ... add` 不转发 `--registry`**：实测把 `--registry=https://registry.npmjs.org` 写在 `dsh plugin` 后面时 pnpm 仍查 `mirrors.tencentyun.com`，报「The latest release of dsh-interconnect is <上一个版本>」（发布后几分钟内镜像还没同步）。**可靠做法**是在 profile 目录直接 `pnpm add`，`--registry` 才会生效。
 - **`curl /` 在重启后可能先返回 404**：应用在组合插件树期间 Web 服务会先应答 404，几秒后才回到 401。判活要**轮询到 401**（或非 000/404）再下结论，别把启动窗口里的 404 当成挂载失败。
@@ -95,14 +95,24 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 
 `scripts/probe-deployed-link.cjs` 的用法：`IC_TOKEN` 必填（从该机 `$DSH_HOME/.credentials.yaml` 的 `DSH_INTERCONNECT_TOKEN` 取；它在 `refs:` 下**有两格缩进**，行首锚定的 sed 会取到空串）、`IC_PORT` 默认 3080。`IC_WS` 现在**可选**：不设时脚本解析本仓的 `ws` devDependency（在本仓 checkout 里直接可跑）；设了则用该路径（例如在某台宿主上跑时指向该机的 `ws` 包）。**不要打印 token 本身**。
 
-### 坑三：devDependency 不能写本机路径
+### 部署后的互联链路检查
+
+升级或改动隧道之后，除了逐台自检，还要确认**三向互联**：服务向某个 peer 发送需要一条**拨号（出站）链路**，只看到对端拨入并不代表本机具备发送能力。
+
+1. **逐台自检**：`GET /` 得 401、`/interconnect/link` 无 token 得 401（注意重启后可能先返回 404，见坑一），再跑一次 `scripts/probe-deployed-link.cjs` 五帧。
+2. **隧道单元**：两台 Linux 上 `systemctl is-active ic-tunnel-ci-windows.service`；Windows 侧 `Get-ScheduledTask -TaskName DSH-IC-Tunnels` 应为 `Running`、`@(Get-Process ssh).Count` ≥ 2、19001 与 13080 处于 LISTEN。
+3. **`NRestarts` 是累计值，不代表"现在是否在重启"**：`systemctl show <unit> -p NRestarts --value` 可能是六位数（长期 flapping 的历史累计，实测 184245）。判据是**相隔约 20 秒取两次、数值不变且 `is-active=active`**。
+4. **穿透验证**（比 TCP 转发更有说服力）：在任一台用本机凭证里的 token，对**下一跳的隧道端口**跑探测脚本——`IC_PORT=13081`（→ ci-windows）、`19001`（→ momoairi）、`13080`（→ ci-server），期望各自的 `hello from: <instanceId>`；六条有向腿都应通过。
+5. **链路曾两端都断过时，要重启失去链路那一侧的实例**（`sudo -n systemctl restart dsh-web` / Windows 计划任务 Stop+Start），否则它只保留对端拨入，自己要等重连退避才会重新拨号。
+
+### 坑二：devDependency 不能写本机路径
 
 本仓 CI 只检出 public mirror 到工作区的 `dsh/`，所以 devDependency 只有两种写法能在 CI 里解析：`link:../dsh/...`（sibling checkout 内的未发布包），或 registry 上的已发布版本。写任何本机路径（如 `link:../.dsh/source/current/...`）在本地能过、在 CI 的 typecheck 阶段必红（`TS2307`），且 `pnpm install` 不会提前报错。
 
-为新增 devDependency 选 registry 版本时先看发布时间：pnpm 11 的 `minimumReleaseAge=1440` 会拒绝 24 小时内发布的版本（见坑一），所以别直接选当天的 alpha；用 `npm view <pkg> time --json` 确认，并核实该版本确实导出需要的符号。
+为新增 devDependency 选 registry 版本时先看发布时间：pnpm 11 的 `minimumReleaseAge=1440` 会拒绝 24 小时内发布的版本（见坑三），所以别直接选当天的 alpha；用 `npm view <pkg> time --json` 确认，并核实该版本确实导出需要的符号。
 
 
-### 坑一：pnpm 的供应链年龄门禁
+### 坑三：pnpm 的供应链年龄门禁
 
 pnpm 11 默认 `minimumReleaseAge=1440`（24 小时，`pnpm config get` 显示 `undefined` 但确实生效）。刚发布的版本会被锁文件校验拒绝：
 
@@ -112,7 +122,7 @@ ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION
 
 `minimumReleaseAgeExclude` 里写了**也不参与**锁文件校验，删 `pnpm-lock.yaml` 也不够（校验会按 `package.json` 的 spec 重判）。**有效做法**是安装时加 `--config.minimumReleaseAge=0`（单次生效，不改任何配置文件）。回退到已发布超过 24 小时的版本则不需要这个 flag。
 
-### 坑二：代理与镜像
+### 坑四：代理与镜像
 
 若该机 `~/.npmrc` 配了 `proxy`，而 registry 指向内网镜像，可能出现"代理对 npmjs 通、对镜像 ECONNRESET"。此时用 `--registry=https://registry.npmjs.org` 绕开镜像。
 
