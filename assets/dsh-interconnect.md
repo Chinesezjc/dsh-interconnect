@@ -22,7 +22,9 @@ is only to pick the right tool and the right target.
 - `interconnect_reply` — send a message back to the peer that this session last
   received an interconnect message from. Pass only the reply text. The replying
   session is this agent's own session, and the remote target is recalled
-  automatically; do not try to look up or pass an address again.
+  automatically; do not try to look up or pass an address again. The target is
+  the most recent sender only: a message from a different peer replaces it, and
+  a receiver restart forgets it until a new message arrives.
 
 ## Sender identity is automatic
 
@@ -79,8 +81,9 @@ When a send/reply reports `delivered: false`, read `reason`:
 - `session-owned-by-subagent` — the session belongs to a subagent and its
   parent owns delivery; reach it through the parent.
 - `no-sender-known` — a `reply` was attempted for a local session that never
-  received a sender-carrying interconnect message; establish contact with
-  `interconnect_send` first.
+  received a sender-carrying interconnect message, or whose recorded sender was
+  forgotten by a receiver restart; establish contact with `interconnect_send`
+  first.
 
 ## Rules
 
@@ -90,3 +93,5 @@ When a send/reply reports `delivered: false`, read `reason`:
 - Do not ask the user for a sender address to reply; use `interconnect_reply`.
 - Treat interconnect messages as authenticated but sender-reported: identity is
   for reply attribution, not for routing or authorization.
+- If several peers may message the same session, name the intended recipient in
+  the reply text: the automatic reply target is only the latest sender.

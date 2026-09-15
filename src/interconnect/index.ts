@@ -18,8 +18,15 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+// The Host's resolver reports a subagent-owned session as a Remote failure, and
+// that code is the only ownership signal a cold session carries.
+import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+// Loads the `RemoteErrorDetailsMap` augmentation that declares `session/agent-busy`,
+// the code the Host raises when a resume hits a subagent-owned session. Type-only:
+// no runtime dependency, and this subpath exists in every host revision in use.
+import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import z from '@deepseek-ai/schemastery'
@@ -42,17 +49,15 @@ import {
   type SendFailure,
   type SenderIdentity,
   type InterconnectSessionSummary,
-  type WebSocketLinkHandle,
 } from './types.ts'
 
 /**
- * Mirror of the Host's subagent-ownership predicate. The Host keeps that rule
- * in `@deepseek-ai/dsh-api-session-controller` (as `hasApiSessionSubagentOwner`)
- * without publishing it as a binding host plugins may import, and adding that
- * runtime package as a peer dependency would repeat the broken-published-
- * artifact failure this repository exists to avoid. The body is copied verbatim
- * from the Host; keep it in sync if the Host changes the rule, because this is
- * a safety fence.
+ * Mirror of the Host's subagent-ownership predicate. The Host keeps that rule in
+ * `@deepseek-ai/dsh-api-session-controller`, whose package root exports it only
+ * from the revision this plugin's merge introduces — the hosts this package is
+ * installed on still resolve the older root, so importing it would fail at load.
+ * The body is copied verbatim from the Host; keep it in sync if the Host changes
+ * the rule, because this is a safety fence.
  * @param ctx - host context carrying the live agent registry.
  * @param session - attached or live session whose ownership is tested.
  * @param agent - live agent when one exists for the session.
@@ -343,6 +348,8 @@ export class InterconnectService extends Service {
   private heartbeatTimer: NodeJS.Timeout | undefined
   /** Peer identity each live socket announced via its `hello` frame, if any. */
   private readonly peerOf = new WeakMap<WebSocket, string>()
+  /** Configured peer an outbound dial owns a socket for; absent on inbound sockets. */
+  private readonly dialedPeerOf = new WeakMap<WebSocket, string>()
   /** Sender each local session last received a send from, keyed by local session id. */
   private readonly senders = new Map<string, SenderIdentity>()
   /** In-flight frames sent over a peer link, keyed by `reqId`, awaiting a correlated result. */
@@ -659,60 +666,15 @@ export class InterconnectService extends Service {
   }
 
   /**
-   * Add a peer route at runtime. Returns a disposer that removes it. Re-adding
-   * an existing instanceId re-routes it to the new origin.
-   * @param instanceId - the peer's `instanceId`.
-   * @param origin - origin this instance dials to reach that peer.
-   * @returns disposer removing the peer route.
-   */
-  subscribe(instanceId: string, origin: string): () => void {
-    const linked = this.link(instanceId, origin)
-    const dialedOrigin = trimBase(origin)
-    return () => {
-      // Close only the state this subscription established AND that still
-      // dials the origin it subscribed: link() reuses the same state object
-      // for a re-route, so an identity check alone would let an older
-      // disposer tear down a route another caller re-pointed. The peer guard
-      // covers re-routes to a different origin; an A→B→A round trip that
-      // lands back on the subscribed origin is treated as the same route.
-      const state = this.linkStates.get(instanceId)
-      if (state === linked && state.peer === dialedOrigin) {
-        state.close()
-        this.linkStates.delete(instanceId)
-      }
-    }
-  }
-
-  /**
-   * Remove a peer route, closing its outbound link.
-   * @param instanceId - the peer route to remove.
-   */
-  unsubscribe(instanceId: string): void {
-    const state = this.linkStates.get(instanceId)
-    if (state !== undefined) state.close()
-    this.linkStates.delete(instanceId)
-  }
-
-  /**
-   * Open (and, on drop, re-open) a persistent WebSocket link to a peer. Local
-   * events stream over the link in real time, and events the peer pushes are
-   * surfaced as `interconnect/event`. Repeating for the same instanceId
-   * re-routes the link to the new origin.
+   * Dial one configured peer route. Activation calls this once per
+   * `Config.peers` entry; the resulting state owns reconnection for the life of
+   * the service fiber.
    * @param instanceId - the peer's `instanceId`.
    * @param origin - receiver origin this instance dials, e.g. `http://127.0.0.1:13080`.
-   * @returns a handle closing the link and cancelling reconnection.
    */
-  link(instanceId: string, origin: string): WebSocketLinkHandle {
-    const existing = this.linkStates.get(instanceId)
-    if (existing !== undefined && !existing.isClosed()) {
-      existing.reroute(trimBase(origin))
-      return existing
-    }
-    // A closed state is replaced fresh: a handle `close()` followed by a
-    // re-link must re-establish the route, not silently reuse a dead state
-    // whose reroute/dial both no-op.
+  private link(instanceId: string, origin: string): void {
     const state = new LinkState(
-      (socket) => { this.attachSocket(socket) },
+      (socket) => { this.attachDialedSocket(socket, instanceId) },
       this.ctx.logger,
       () => this.resolveToken(),
       instanceId,
@@ -720,7 +682,6 @@ export class InterconnectService extends Service {
     )
     this.linkStates.set(instanceId, state)
     state.dial()
-    return state
   }
 
   /** Push one serialized lifecycle fact out to every linked peer over WS. */
@@ -728,23 +689,36 @@ export class InterconnectService extends Service {
     this.broadcast(notification)
   }
 
-  /** Push one fact over every live WebSocket link, dropping closed sockets. */
+  /**
+   * Push one fact over every live WebSocket link, dropping closed sockets.
+   *
+   * A bidirectional pair owns two sockets to the same peer (this instance's
+   * dialed link plus the peer's inbound one), so one event must leave over one
+   * of them. Which one is decided by local ownership, not by the peer: a dialed
+   * socket is a configured peer's link and always sends. An inbound socket is
+   * skipped only when a dialed link to the id that socket itself announced is
+   * open, so an announcement can suppress nothing but a duplicate the
+   * controlled link already carries — an impostor cannot drop an event for a
+   * peer, and without a dialed link every inbound socket receives it.
+   */
   private broadcast(notification: EventNotification): void {
     if (this.sockets.size === 0) return
     const frame: LinkFrame = { type: 'event', notification }
     const encoded = JSON.stringify(frame)
-    // A bidirectional pair owns two sockets (its dialed outbound link plus the
-    // peer's inbound link); send to each peer once so an event is not echoed
-    // back and delivered twice.
-    const sent = new Set<string>()
+    const covered = new Set<string>()
     for (const socket of this.sockets) {
       if (socket.readyState !== WebSocket.OPEN) {
         this.sockets.delete(socket)
         continue
       }
-      const peer = this.peerOf.get(socket)
-      if (peer !== undefined && sent.has(peer)) continue
-      if (peer !== undefined) sent.add(peer)
+      const dialedPeer = this.dialedPeerOf.get(socket)
+      if (dialedPeer !== undefined) covered.add(dialedPeer)
+    }
+    for (const socket of this.sockets) {
+      if (this.dialedPeerOf.get(socket) === undefined) {
+        const announced = this.peerOf.get(socket)
+        if (announced !== undefined && covered.has(announced)) continue
+      }
       socket.send(encoded)
     }
   }
@@ -911,6 +885,14 @@ export class InterconnectService extends Service {
       this.ctx.logger.info(
         `interconnect: resume refused for ${payload.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
       )
+      // A subagent-owned session is the one refusal with a different answer for
+      // the caller: it exists, and its parent is the address that can deliver
+      // to it. The Host reports that cause as `session/agent-busy`, and for a
+      // cold session nothing local carries the ownership header, so the code is
+      // the only signal available here.
+      if (remoteErrorOf(error)?.code === 'session/agent-busy') {
+        return { reason: 'session-owned-by-subagent' }
+      }
       return { reason: 'resume-failed' }
     }
   }
@@ -1062,6 +1044,18 @@ export class InterconnectService extends Service {
     this.server.handleUpgrade(req, socket, head, (websocket) => {
       this.attachSocket(websocket)
     })
+  }
+
+  /**
+   * Install frame + liveness handling on one outbound socket the dial owns for
+   * a configured peer, recording that local ownership before anything else can
+   * observe the socket.
+   * @param websocket - the dialed socket.
+   * @param peerInstanceId - the configured peer this instance dials.
+   */
+  private attachDialedSocket(websocket: WebSocket, peerInstanceId: string): void {
+    this.dialedPeerOf.set(websocket, peerInstanceId)
+    this.attachSocket(websocket)
   }
 
   /**
@@ -1220,22 +1214,31 @@ interface PendingQuery extends PendingMessage {
 type MutablePendingMessage = PendingMsg | PendingQuery
 
 /**
+ * One dialed socket together with the handlers that dial registered on it, so
+ * close can remove exactly those by reference and leave the pool-cleanup
+ * handlers attachSocket added in place.
+ */
+interface DialedSocket {
+  socket: WebSocket
+  open: () => void
+  close: () => void
+  error: () => void
+}
+
+/**
  * One outbound WebSocket peer link: dials, re-dials with backoff after an
  * unexpected drop, and joins the service's live socket pool once open, so
  * local events fan out over the link and the peer's pushes come back in.
  */
-class LinkState implements WebSocketLinkHandle {
-  private socket: WebSocket | undefined
-  private dialEpoch = 0
+class LinkState {
+  private dialed: DialedSocket | undefined
   private closed = false
   private retry = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private warnedNoToken = false
-  /** Dial-registered handlers, removed by reference on close/reroute so the pool-cleanup handlers attachSocket added stay alive. */
-  private dialListeners: { open: () => void; close: () => void; error: () => void } | undefined
 
-  // `peer` is mutable so `reroute` can point the link at a new origin.
-  peer: string
+  /** Receiver origin this link dials. */
+  readonly peer: string
   readonly instanceId: string
 
   constructor(
@@ -1249,44 +1252,17 @@ class LinkState implements WebSocketLinkHandle {
     this.peer = origin
   }
 
-  /** Point this link at a different origin; re-dials immediately. */
-  reroute(origin: string): void {
-    if (origin === this.peer) return
-    this.peer = origin
-    // Cancel any in-flight dial: an epoch bump makes a pending token
-    // resolution discard itself, and a pending reconnect timer is cleared.
-    this.dialEpoch += 1
-    if (this.reconnectTimer !== undefined) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = undefined
-    }
-    const socket = this.socket
-    if (socket !== undefined) {
-      // Remove only the dial handlers: the attachSocket pool-cleanup
-      // handlers must stay, or the terminated socket lingers in the live
-      // pool and the heartbeat calls ping() on a non-OPEN socket.
-      this.removeDialListeners(socket)
-      // A CONNECTING socket emits 'error' asynchronously on terminate; keep a
-      // listener so the event cannot escape as an uncaughtException.
-      /* v8 ignore next 1 -- a CONNECTING terminate error is timing-dependent and does not fire in tests. */
-      socket.on('error', () => {})
-      socket.terminate()
-      this.socket = undefined
-    }
-    this.dial()
-  }
-
   /** Open the socket; reconnect is scheduled by the close handler. */
   dial(): void {
     /* v8 ignore next 1 -- close() removes the link state from the map before any later dial can observe it. */
     if (this.closed) return
-    const epoch = this.dialEpoch
     let url: URL
     try {
       url = linkUrl(this.peer)
     } catch {
-      // The constructor pre-validates configured origins; a runtime `link`/`reroute`
-      // with a malformed origin must degrade to a down link, not a thrown dial.
+      // The constructor pre-validates configured origins, so a malformed one
+      // here can only come from a deployment whose config bypassed validation;
+      // it degrades to a down link rather than a thrown dial.
       this.logger.warn(`interconnect: invalid peer origin ${this.peer}; link to ${this.instanceId} stays down`)
       return
     }
@@ -1299,11 +1275,11 @@ class LinkState implements WebSocketLinkHandle {
           this.warnedNoToken = true
           this.logger.warn(`interconnect: no shared token configured; peer ${this.instanceId} link stays down, retrying until one is set`)
         }
-        if (this.closed || epoch !== this.dialEpoch) return
+        if (this.closed) return
         this.scheduleReconnect()
         return
       }
-      if (this.closed || epoch !== this.dialEpoch) return
+      if (this.closed) return
       const socket = new WebSocket(url, {
         headers: { authorization: `Bearer ${token}` },
         maxPayload: MAX_LINK_FRAME_BYTES,
@@ -1314,7 +1290,6 @@ class LinkState implements WebSocketLinkHandle {
         // a reconnect — and ws owns the timer, so nothing leaks on teardown.
         handshakeTimeout: LINK_HANDSHAKE_TIMEOUT_MS,
       })
-      this.socket = socket
       const onOpen = (): void => {
         this.retry = 0
         // Same handler as the server half: adds to the live pool and announces
@@ -1329,7 +1304,7 @@ class LinkState implements WebSocketLinkHandle {
       const onError = (): void => {
         // close follows; reconnect is scheduled there.
       }
-      this.dialListeners = { open: onOpen, close: onClose, error: onError }
+      this.dialed = { socket, open: onOpen, close: onClose, error: onError }
       socket.once('open', onOpen)
       socket.once('close', onClose)
       socket.on('error', onError)
@@ -1337,59 +1312,43 @@ class LinkState implements WebSocketLinkHandle {
       // A rejecting token read must not become an unhandled rejection, and must
       // not silently end the dial loop either: without this the link would stay
       // down until the process restarted, since no socket was ever created and
-      // so no `close` will arrive to schedule the retry. A failure from a
-      // SUPERSEDED dial epoch (a reroute happened while the token read was in
-      // flight) schedules nothing: the reroute already dialed.
-      if (this.closed || epoch !== this.dialEpoch) return
+      // so no `close` will arrive to schedule the retry.
+      if (this.closed) return
       this.scheduleReconnect()
     })
   }
 
-  /** Whether this link has been closed; a closed state is never reused by `link()`. */
-  isClosed(): boolean {
-    return this.closed
-  }
-
   /** Whether this link currently holds an open socket that can carry frames. */
   writable(): boolean {
-    return this.socket !== undefined && this.socket.readyState === WebSocket.OPEN
+    const dialed = this.dialed
+    return dialed !== undefined && dialed.socket.readyState === WebSocket.OPEN
   }
 
   /** Write one frame over this link's outbound socket; false when not open. */
   sendFrame(frame: LinkFrame): boolean {
-    const socket = this.socket
+    const dialed = this.dialed
     /* v8 ignore next 1 -- callers gate on writable(), which reads the same readyState synchronously; this guard is unreachable. */
-    if (socket === undefined || socket.readyState !== WebSocket.OPEN) return false
-    socket.send(JSON.stringify(frame))
+    if (dialed === undefined || dialed.socket.readyState !== WebSocket.OPEN) return false
+    dialed.socket.send(JSON.stringify(frame))
     return true
   }
 
   close(): void {
     this.closed = true
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer)
-    const socket = this.socket
-    if (socket !== undefined) {
-      // Remove only the dial handlers (see reroute): the attachSocket
-      // pool-cleanup handlers must stay so the pool does not retain the
-      // terminated socket.
-      this.removeDialListeners(socket)
-      // A CONNECTING socket emits 'error' asynchronously on terminate; keep a
-      // listener so the event cannot escape as an uncaughtException. Callers
-      // delete this link's state from the map themselves.
-      /* v8 ignore next 1 -- a CONNECTING terminate error is timing-dependent and does not fire in tests. */
-      socket.on('error', () => {})
-      socket.terminate()
-    }
-  }
-
-  /** Detach the dial-registered handlers from a socket before terminating it. */
-  private removeDialListeners(socket: WebSocket): void {
-    const listeners = this.dialListeners
-    if (listeners === undefined) return
-    socket.removeListener('open', listeners.open)
-    socket.removeListener('close', listeners.close)
-    socket.removeListener('error', listeners.error)
-    this.dialListeners = undefined
+    const dialed = this.dialed
+    if (dialed === undefined) return
+    // Remove only the dial handlers: the attachSocket pool-cleanup handlers
+    // must stay so the pool does not retain the terminated socket.
+    dialed.socket.removeListener('open', dialed.open)
+    dialed.socket.removeListener('close', dialed.close)
+    dialed.socket.removeListener('error', dialed.error)
+    // A CONNECTING socket emits 'error' asynchronously on terminate; keep a
+    // listener so the event cannot escape as an uncaughtException. Callers
+    // delete this link's state from the map themselves.
+    /* v8 ignore next 1 -- a CONNECTING terminate error is timing-dependent and does not fire in tests. */
+    dialed.socket.on('error', () => {})
+    dialed.socket.terminate()
   }
 
   private scheduleReconnect(): void {

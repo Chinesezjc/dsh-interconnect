@@ -2,6 +2,25 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.13（2026-09-15）
+
+跟随 #3243 分支新 head（`dddb32d80a`）：删除运行时 peer 路由 API、链路状态机重构、唤醒失败原因更准确，并澄清回复目标语义。
+
+### 变更
+
+- **删除运行时 peer 路由 API**：`InterconnectService.subscribe()` / `unsubscribe()` 与 `WebSocketLinkHandle` 类型移除；peer 只来自 `Config.peers`，激活时拨号一次，由链路状态自行重连（新增 `dialedPeerOf` 与 `attachDialedSocket`，`LinkState` 不再实现该句柄）。本包对外类型面因此少一个类型（pre-1.0，属预期）。
+- **唤醒失败原因更准确**：Host 在恢复 subagent 占用的 session 时抛 `session/agent-busy`，现在经 `remoteErrorOf` 识别并返回 `session-owned-by-subagent`（此前落到 `resume-failed`）。
+- **回复目标语义写进模型可见文本**（skill 正文 3 处 + `interconnect_reply` 工具描述）：recalled target **只记最近一个发送者**，不同对端的新消息会顶掉它、接收方重启即遗忘；多个对端可能给同一 session 发消息时应在回复文本里点名收件人。
+- **新增 peer 依赖** `@deepseek-ai/dsh-typert-protocol`（`remoteErrorOf` 的来源）。
+- **保留的一处适配**（与上游的差异，门禁中已登记）：上游本次把 `hasApiSessionSubagentOwner` 作为**值**从 `@deepseek-ai/dsh-api-session-controller` 入口导入，并在同一提交里给该包入口补了这条导出；本包安装所在的宿主仍解析旧入口，值导入会在加载时失败，故**保留镜像谓词**；另加一条**纯类型**子路径导入（`@deepseek-ai/dsh-api-session-controller/types`）加载 `session/agent-busy` 的 `RemoteErrorDetailsMap` 合并声明，零运行时代价。
+
+### 验证
+
+- `pnpm run check`（typecheck + 161/161 tests + build）全绿；用例数由 168 降至 161，是因为上游本次删除了 `subscribe`/`unsubscribe` 相关用例。
+- 对齐门禁：`no behavioural drift against dddb32d80a across 7 ported files, 1 byte-exact asset, and 1 patch row set`。
+- 产物：`lib/` 有 3 个文件与 0.11.12 不同（服务、根 bundle、tool），确认本版有真实行为变化。
+- 三台部署升级后复核五种线上帧探测与链路。
+
 ## 0.11.12（2026-09-15）
 
 跟随 #3243 分支新 head（`aeefb65bde`）：把 live 口径的措辞统一收尾（纯文档，无行为变化）。

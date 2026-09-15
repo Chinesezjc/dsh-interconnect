@@ -10,6 +10,7 @@ import type { WebServer, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver
 import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { Agent, SessionStartSource } from '@deepseek-ai/dsh-agent'
 import InterconnectService, { INTERCONNECT_TOKEN_REF, linkUrl } from '../src/interconnect/index.ts'
 import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'
@@ -173,6 +174,28 @@ function fakeSocket(state: { readyState?: number; isAlive?: boolean } = {}): {
 /** Attach a fake socket through the private seam the outbound dial uses. */
 function attachSocket(service: InterconnectService, socket: WebSocket & { sent: string[]; isAlive: boolean }): void {
   ;(service as unknown as { attachSocket(s: WebSocket): void }).attachSocket(socket)
+}
+
+/** Attach a fake socket as one outbound dialed link for a configured peer. */
+function attachDialedSocket(
+  service: InterconnectService,
+  socket: WebSocket & { sent: string[]; isAlive: boolean },
+  peerInstanceId: string,
+): void {
+  ;(service as unknown as { attachDialedSocket(s: WebSocket, peer: string): void }).attachDialedSocket(socket, peerInstanceId)
+}
+
+/** Dial one peer route through the private seam service activation uses. */
+function linkRoute(service: InterconnectService, instanceId: string, origin: string): void {
+  ;(service as unknown as { link(id: string, origin: string): void }).link(instanceId, origin)
+}
+
+/** Close one dialed route through the private route table, simulating fiber teardown. */
+function closeRoute(service: InterconnectService, instanceId: string): void {
+  const states = (service as unknown as { linkStates: Map<string, { close(): void }> }).linkStates
+  const state = states.get(instanceId)
+  if (state !== undefined) state.close()
+  states.delete(instanceId)
 }
 
 interface MountOptions {
@@ -385,7 +408,7 @@ describe('interconnect over real WS links', () => {
     const b = await mounted('secret', new Set(['B-sess']), { 'inst-a': aUrl }, 'followup', true, 'inst-b')
     const bServ = await serveUpgrade(b.upgrades)
     const bUrl = `http://127.0.0.1:${String(bServ.port)}`
-    a.ctx.interconnect.link('inst-b', bUrl) // A links back to B
+    linkRoute(a.ctx.interconnect, 'inst-b', bUrl) // A links back to B
     try {
       await wait(250) // both links dial + hello
       const sent = await b.ctx.interconnect.send({
@@ -577,101 +600,6 @@ describe('interconnect config defaults and route lifecycle', () => {
     await dispose()
   })
 
-  it('subscription disposer tolerates a route already removed', async () => {
-    const receiver = await mounted('secret', new Set([SESSION_ID]))
-    const r = await serveUpgrade(receiver.upgrades)
-    const rUrl = `http://127.0.0.1:${String(r.port)}`
-    const sender = await mounted('secret', new Set([]))
-    try {
-      const disposer = sender.ctx.interconnect.subscribe('runtime-peer', rUrl)
-      await wait(200)
-      sender.ctx.interconnect.unsubscribe('runtime-peer')
-      disposer() // the state is already gone; the disposer must not throw
-    } finally {
-      await sender.dispose()
-      await r.close()
-      await receiver.dispose()
-    }
-  })
-
-  it('adds and removes peer routes at runtime, re-dialing fresh after removal', async () => {
-    const receiver = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'runtime-recv')
-    const r = await serveUpgrade(receiver.upgrades)
-    const rUrl = `http://127.0.0.1:${String(r.port)}`
-    const sender = await mounted('secret', new Set([]))
-    try {
-      const disposer = sender.ctx.interconnect.subscribe('runtime-peer', rUrl)
-      await wait(200)
-      expect((await sender.ctx.interconnect.ping('runtime-peer'))?.pong).toBe(true)
-      sender.ctx.interconnect.unsubscribe('runtime-peer')
-      expect(await sender.ctx.interconnect.ping('runtime-peer')).toBeUndefined()
-      // close() removed the state, so re-linking dials a fresh link.
-      sender.ctx.interconnect.link('runtime-peer', rUrl)
-      await wait(200)
-      expect((await sender.ctx.interconnect.ping('runtime-peer'))?.pong).toBe(true)
-      disposer()
-    } finally {
-      await sender.dispose()
-      await r.close()
-      await receiver.dispose()
-    }
-  })
-
-  it('re-routes an existing peer link when the origin changes', async () => {
-    const sender = await mounted('secret', new Set([]))
-    const receiverA = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'inst-a')
-    const aServ = await serveUpgrade(receiverA.upgrades)
-    const receiverB = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'inst-b')
-    const bServ = await serveUpgrade(receiverB.upgrades)
-    try {
-      const handle = sender.ctx.interconnect.link('peer-x', `http://127.0.0.1:${String(aServ.port)}`)
-      await wait(200)
-      expect((await sender.ctx.interconnect.ping('peer-x'))?.instance).toBe('inst-a')
-      // Same origin is a no-op reroute.
-      sender.ctx.interconnect.link('peer-x', `http://127.0.0.1:${String(aServ.port)}`)
-      await wait(100)
-      expect((await sender.ctx.interconnect.ping('peer-x'))?.instance).toBe('inst-a')
-      // Different origin tears the old socket down and re-dials.
-      sender.ctx.interconnect.link('peer-x', `http://127.0.0.1:${String(bServ.port)}`)
-      await wait(250)
-      expect((await sender.ctx.interconnect.ping('peer-x'))?.instance).toBe('inst-b')
-      handle.close()
-    } finally {
-      await sender.dispose()
-      await aServ.close()
-      await receiverA.dispose()
-      await bServ.close()
-      await receiverB.dispose()
-    }
-  })
-
-  it('rerouting cancels a pending reconnect to the old origin', { timeout: 15000 }, async () => {
-    const sender = await mounted('secret', new Set([]))
-    const receiverA = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'inst-a')
-    const aServ = await serveUpgrade(receiverA.upgrades)
-    const receiverB = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'inst-b')
-    const bServ = await serveUpgrade(receiverB.upgrades)
-    try {
-      const handle = sender.ctx.interconnect.link('peer-y', `http://127.0.0.1:${String(aServ.port)}`)
-      await wait(150)
-      expect((await sender.ctx.interconnect.ping('peer-y'))?.instance).toBe('inst-a')
-      // Drop the link: the close handler schedules a reconnect.
-      const sockets = (sender.service as unknown as { sockets: Set<WebSocket> }).sockets
-      for (const socket of [...sockets]) socket.terminate()
-      await wait(150)
-      // Reroute while the reconnect timer is pending: the old timer is
-      // cancelled and the dial goes to the new origin immediately.
-      sender.ctx.interconnect.link('peer-y', `http://127.0.0.1:${String(bServ.port)}`)
-      await wait(200)
-      expect((await sender.ctx.interconnect.ping('peer-y'))?.instance).toBe('inst-b')
-      handle.close()
-    } finally {
-      await sender.dispose()
-      await receiverA.dispose()
-      await bServ.close()
-      await receiverB.dispose()
-    }
-  })
 })
 
 describe('interconnect lifecycle event fan-out', () => {
@@ -710,25 +638,34 @@ describe('interconnect lifecycle event fan-out', () => {
     }
   })
 
-  it('sends each lifecycle event to a peer once even with two sockets', async () => {
+  it('sends each lifecycle event once per peer, preferring the link this instance dials', async () => {
     const receiver = await mounted('secret', new Set([]))
     const sockets = (receiver.service as unknown as { sockets: Set<WebSocket> }).sockets
-    const first = fakeSocket()
-    const second = fakeSocket()
-    attachSocket(receiver.service, first.socket)
-    attachSocket(receiver.service, second.socket)
-    // Both sockets announce the same peer identity: a bidirectional pair.
-    first.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'same-peer' }))
-    second.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'same-peer' }))
-    receiver.ctx.emit('agent/created', agentPayload('s1'))
-    const sent = first.socket.sent.concat(second.socket.sent).filter(line => line.includes('"type":"event"'))
-    expect(sent.length).toBe(1)
-    expect(sockets.has(first.socket)).toBe(true)
-    // A socket that never announced a peer identity still receives the event.
+    const events = (socket: { sent: string[] }): string[] => socket.sent.filter(line => line.includes('"type":"event"'))
+    const dialed = fakeSocket()
+    const inbound = fakeSocket()
+    const other = fakeSocket()
     const anonymous = fakeSocket()
-    attachSocket(receiver.service, anonymous.socket)
-    receiver.ctx.emit('agent/created', agentPayload('s2'))
-    expect(anonymous.socket.sent.some(line => line.includes('"type":"event"'))).toBe(true)
+    attachDialedSocket(receiver.service, dialed.socket, 'peer-b')
+    for (const socket of [inbound, other, anonymous]) attachSocket(receiver.service, socket.socket)
+    // The dialed link and an inbound socket both announce peer-b: a
+    // bidirectional pair. peer-z is a peer that dialed in, and the last socket
+    // announced no identity at all.
+    for (const socket of [dialed, inbound]) {
+      socket.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'peer-b' }))
+    }
+    other.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'peer-z' }))
+    receiver.ctx.emit('agent/created', agentPayload('s1'))
+    expect(events(dialed.socket)).toHaveLength(1)
+    // The inbound duplicate of the dialed peer is skipped, so peer-b still
+    // receives the event exactly once, over the link this instance owns.
+    expect(events(inbound.socket)).toHaveLength(0)
+    // An announced id no dialed link covers, and a socket that announced no
+    // identity, both receive the event: an announcement can only suppress a
+    // duplicate a controlled link already carries.
+    expect(events(other.socket)).toHaveLength(1)
+    expect(events(anonymous.socket)).toHaveLength(1)
+    expect(sockets.has(dialed.socket)).toBe(true)
     await receiver.dispose()
   })
 
@@ -909,6 +846,31 @@ describe('interconnect delivery modes and wake', () => {
     await receiver.dispose()
   })
 
+  it('maps the Host ownership refusal on the wake path to session-owned-by-subagent', async () => {
+    const receiver = await mounted('secret', new Set([]), {}, 'followup', true, 'test-instance', {
+      provides: {
+        typert: {
+          lookups: {
+            // Exactly what the Host's `agent` resolver throws for a cold
+            // subagent-owned session, where no local header carries ownership.
+            get: () => ({
+              resolve: async () => {
+                throw new RemoteError('session/agent-busy', 'session "ghost" is owned by subagent routing', { reason: 'use subagent delivery for this child session' })
+              },
+            }),
+          },
+        },
+      },
+    })
+    const frames = await deliverInbound(receiver.service, { kind: 'send', sessionId: 'ghost', text: 'hi', resume: true })
+    expect(frames).toContainEqual({
+      type: 'msg-result',
+      reqId: 'w-1',
+      result: { delivered: false, instance: 'test-instance', reason: 'session-owned-by-subagent' },
+    })
+    await receiver.dispose()
+  })
+
   it('wakes a persisted session when the lookup resolves an agent', async () => {
     const deliveries = new Map<string, string[]>()
     const woken = {
@@ -956,7 +918,7 @@ describe('interconnect delivery modes and wake', () => {
     const receiver = await mounted('secret', new Set(['R-sess']), { 'inst-send': sUrl }, 'followup', true, 'inst-recv')
     const rServ = await serveUpgrade(receiver.upgrades)
     const rUrl = `http://127.0.0.1:${String(rServ.port)}`
-    sender.ctx.interconnect.link('inst-recv', rUrl)
+    linkRoute(sender.ctx.interconnect, 'inst-recv', rUrl)
     try {
       await wait(250)
       const result = await sender.ctx.interconnect.send({
@@ -984,6 +946,28 @@ describe('interconnect delivery modes and wake', () => {
       await receiver.dispose()
       await sServ.close()
     }
+  })
+
+  it('refuses a woken delivery when the service is disposed during the wake', async () => {
+    let releaseWake!: () => void
+    const wakeGate = new Promise<void>((resolve) => { releaseWake = resolve })
+    const receiver = await mounted('secret', new Set([]), {}, 'followup', true, 'test-instance', {
+      provides: {
+        typert: {
+          lookups: {
+            get: () => ({ async resolve() { await wakeGate; return { id: 'woken-sess', session: { id: 'woken-sess' } } } }),
+          },
+        },
+      },
+    })
+    const deliverPromise = (
+      receiver.service as unknown as { deliver(payload: Record<string, unknown>): Promise<Record<string, unknown>> }
+    ).deliver({ sessionId: 'woken-sess', text: 'wake me', resume: true })
+    await wait(20)
+    await receiver.dispose()
+    releaseWake()
+    const result = await deliverPromise
+    expect(result).toEqual({ delivered: false, instance: 'test-instance', reason: 'unreachable' })
   })
 })
 
@@ -1259,6 +1243,43 @@ describe('interconnect upgrade auth edge paths', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('upgrade failed'))
     warn.mockRestore()
     await receiver.dispose()
+  })
+
+  it('warns once across the token-less dials the reconnect backoff repeats', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+    let resolveCalls = 0
+    ctx.provide('credentials', {
+      resolve: () => {
+        resolveCalls += 1
+        return Promise.resolve(undefined)
+      },
+    } as unknown as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'token-less',
+      requestTimeoutMs: 10000,
+      peers: { 'peer-b': 'http://127.0.0.1:1' },
+    })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const noTokenWarns = (): number =>
+      warn.mock.calls.filter(([message]) => String(message).includes('no shared token configured')).length
+    try {
+      await fiber.await()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(noTokenWarns()).toBe(1)
+      // The backoff re-dials and re-reads the token; the operator has already
+      // been told the link is down, so the retry must stay quiet.
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(resolveCalls).toBe(2)
+      expect(noTokenWarns()).toBe(1)
+    } finally {
+      warn.mockRestore()
+      vi.useRealTimers()
+      await fiber.dispose()
+    }
   })
 
   it('keeps a token-less peer down when the service closes before the token resolves', async () => {
@@ -1800,25 +1821,6 @@ describe('interconnect dial and teardown edge paths', () => {
     await fiber.dispose()
   })
 
-  it('unsubscribes an unknown peer and re-routes a link with no live socket', async () => {
-    const receiver = await mounted('secret', new Set([SESSION_ID]))
-    const r = await serveUpgrade(receiver.upgrades)
-    const rUrl = `http://127.0.0.1:${String(r.port)}`
-    const sender = await mounted(undefined, new Set([]), { 'peer-b': rUrl })
-    try {
-      sender.ctx.interconnect.unsubscribe('missing-peer')
-      // The token-undefined dial left no socket; re-routing skips teardown.
-      sender.ctx.interconnect.link('peer-b', `${rUrl}/other`)
-      expect(await sender.ctx.interconnect.ping('peer-b')).toBeUndefined()
-      // Closing a state with no socket is a no-op beyond the map removal.
-      sender.ctx.interconnect.unsubscribe('peer-b')
-    } finally {
-      await sender.dispose()
-      await r.close()
-      await receiver.dispose()
-    }
-  })
-
   it('dials an https origin with a wss protocol', async () => {
     const sender = await mounted('secret', new Set([]), { 'https-peer': 'https://127.0.0.1:1' })
     try {
@@ -1847,7 +1849,7 @@ describe('interconnect dial and teardown edge paths', () => {
       peers: { 'peer-b': 'http://127.0.0.1:1' },
     })
     await fiber.await()
-    ctx.interconnect.unsubscribe('peer-b')
+    closeRoute(ctx.interconnect, 'peer-b')
     await wait(400) // the resolving token lands after close; the dial stops
     await fiber.dispose()
   })
@@ -1869,7 +1871,7 @@ describe('interconnect dial and teardown edge paths', () => {
       peers: { 'peer-b': 'http://127.0.0.1:1' },
     })
     await fiber.await()
-    ctx.interconnect.unsubscribe('peer-b')
+    closeRoute(ctx.interconnect, 'peer-b')
     await wait(400) // the rejecting token lands after close; no reconnect is scheduled
     await fiber.dispose()
   })
@@ -2124,10 +2126,19 @@ describe('interconnect dial and origin validation', () => {
     await expect(fiber.await()).rejects.toThrow()
   })
 
-  it('keeps a runtime link with an invalid origin down without throwing', async () => {
+  it('fails loudly when a peer origin maps to a non-WebSocket protocol', async () => {
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer([]) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set()))
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, { instanceId: 'bad-proto', requestTimeoutMs: 10000, peers: { bad: 'ftp://example.com' } })
+    await expect(fiber.await()).rejects.toThrow()
+  })
+
+  it('keeps a route with an invalid origin down without throwing', async () => {
     const receiver = await mounted('secret', new Set([SESSION_ID]))
     const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
-    receiver.service.link('bad-peer', 'not a url')
+    linkRoute(receiver.service, 'bad-peer', 'not a url')
     await wait(50)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('invalid peer origin'))
     const result = await receiver.ctx.interconnect.ping('bad-peer')
@@ -2172,62 +2183,6 @@ describe('interconnect link URL mapping', () => {
 
   it('throws on a non-WebSocket protocol origin', () => {
     expect(() => linkUrl('ftp://example.com')).toThrow(/unsupported peer origin protocol/)
-  })
-})
-
-describe('interconnect handle close and re-link', () => {
-  it('re-establishes a link after the handle close', async () => {
-    const receiver = await mounted('secret', new Set([SESSION_ID]))
-    const serv = await serveUpgrade(receiver.upgrades)
-    const sender = await mounted('secret', new Set([]))
-    const url = `http://127.0.0.1:${String(serv.port)}`
-    try {
-      const handle = sender.ctx.interconnect.link('peer-y', url)
-      await wait(200)
-      expect((await sender.ctx.interconnect.ping('peer-y'))?.pong).toBe(true)
-      handle.close()
-      await wait(50)
-      expect(await sender.ctx.interconnect.ping('peer-y')).toBeUndefined()
-      // A closed state is replaced fresh, so re-linking dials a new link.
-      sender.ctx.interconnect.link('peer-y', url)
-      await wait(250)
-      expect((await sender.ctx.interconnect.ping('peer-y'))?.pong).toBe(true)
-    } finally {
-      await sender.dispose()
-      await receiver.dispose()
-      await serv.close()
-    }
-  })
-
-  it('fails loudly when a peer origin maps to a non-WebSocket protocol', async () => {
-    const ctx = new Context()
-    ctx.provide('webServer', fakeHttpServer([]) as WebServer)
-    ctx.provide('agents', fakeAgents(new Map(), new Set()))
-    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
-    const fiber = ctx.plugin(InterconnectService, { instanceId: 'bad-proto', requestTimeoutMs: 10000, peers: { bad: 'ftp://example.com' } })
-    await expect(fiber.await()).rejects.toThrow()
-  })
-
-  it('refuses a woken delivery when the service is disposed during the wake', async () => {
-    let releaseWake!: () => void
-    const wakeGate = new Promise<void>((resolve) => { releaseWake = resolve })
-    const receiver = await mounted('secret', new Set([]), {}, 'followup', true, 'test-instance', {
-      provides: {
-        typert: {
-          lookups: {
-            get: () => ({ async resolve() { await wakeGate; return { id: 'woken-sess', session: { id: 'woken-sess' } } } }),
-          },
-        },
-      },
-    })
-    const deliverPromise = (
-      receiver.service as unknown as { deliver(payload: Record<string, unknown>): Promise<Record<string, unknown>> }
-    ).deliver({ sessionId: 'woken-sess', text: 'wake me', resume: true })
-    await wait(20)
-    await receiver.dispose()
-    releaseWake()
-    const result = await deliverPromise
-    expect(result).toEqual({ delivered: false, instance: 'test-instance', reason: 'unreachable' })
   })
 })
 
@@ -2425,50 +2380,6 @@ describe('interconnect explicit null wire fields', () => {
   })
 })
 
-describe('interconnect subscribe disposer identity', () => {
-  it('does not tear down a replaced link from an older disposer', async () => {
-    const receiver = await mounted('secret', new Set([SESSION_ID]))
-    const serv = await serveUpgrade(receiver.upgrades)
-    const sender = await mounted('secret', new Set([]))
-    const url = `http://127.0.0.1:${String(serv.port)}`
-    try {
-      const disposer = sender.ctx.interconnect.subscribe('peer-z', url)
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-z'))?.pong === true)
-      const handle = sender.ctx.interconnect.link('peer-z', url)
-      handle.close()
-      // Re-linking replaces the closed state with a fresh one.
-      sender.ctx.interconnect.link('peer-z', url)
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-z'))?.pong === true)
-      // The stale disposer must not close the replacement link.
-      disposer()
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-z'))?.pong === true)
-    } finally {
-      await sender.dispose()
-      await receiver.dispose()
-      await serv.close()
-    }
-  })
-})
-
-describe('interconnect subscribe disposer identity', () => {
-  it('closes the link it established when its disposer runs', async () => {
-    const receiver = await mounted('secret', new Set([SESSION_ID]))
-    const serv = await serveUpgrade(receiver.upgrades)
-    const sender = await mounted('secret', new Set([]))
-    const url = `http://127.0.0.1:${String(serv.port)}`
-    try {
-      const disposer = sender.ctx.interconnect.subscribe('peer-w', url)
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-w'))?.pong === true)
-      disposer()
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-w')) === undefined)
-    } finally {
-      await sender.dispose()
-      await receiver.dispose()
-      await serv.close()
-    }
-  })
-})
-
 describe('interconnect msg-result discriminant schema', () => {
   it('drops a failed msg-result frame that omits the reason', async () => {
     const receiver = await mounted('secret', new Set([]))
@@ -2495,16 +2406,16 @@ describe('interconnect msg-result discriminant schema', () => {
 })
 
 describe('interconnect socket pool cleanup', () => {
-  it('removes the terminated socket from the live pool on handle close', async () => {
+  it('removes the terminated socket from the live pool when the route closes', async () => {
     const receiver = await mounted('secret', new Set([SESSION_ID]))
     const serv = await serveUpgrade(receiver.upgrades)
     const sender = await mounted('secret', new Set([]))
     const pool = (sender.service as unknown as { sockets: Set<WebSocket> }).sockets
     const url = `http://127.0.0.1:${String(serv.port)}`
     try {
-      const handle = sender.ctx.interconnect.link('peer-p', url)
+      linkRoute(sender.ctx.interconnect, 'peer-p', url)
       await waitUntil(() => pool.size === 1)
-      handle.close()
+      closeRoute(sender.ctx.interconnect, 'peer-p')
       // The pool-cleanup handler must survive the close, or the heartbeat
       // would ping() a terminated socket.
       await waitUntil(() => pool.size === 0)
@@ -2529,33 +2440,5 @@ describe('interconnect malformed frame handling', () => {
     expect(socket.sent.length).toBe(1)
     warn.mockRestore()
     await receiver.dispose()
-  })
-})
-
-describe('interconnect subscribe disposer reroute identity', () => {
-  it('leaves a re-routed link alone when an older disposer runs', async () => {
-    const receiverA = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'inst-a')
-    const aServ = await serveUpgrade(receiverA.upgrades)
-    const receiverB = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'inst-b')
-    const bServ = await serveUpgrade(receiverB.upgrades)
-    const sender = await mounted('secret', new Set([]))
-    const urlA = `http://127.0.0.1:${String(aServ.port)}`
-    const urlB = `http://127.0.0.1:${String(bServ.port)}`
-    try {
-      const disposer = sender.ctx.interconnect.subscribe('peer-r', urlA)
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-r'))?.instance === 'inst-a')
-      // Another caller re-points the route; link() reuses the same state.
-      sender.ctx.interconnect.link('peer-r', urlB)
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-r'))?.instance === 'inst-b')
-      // The older disposer must not tear down the re-routed link.
-      disposer()
-      await waitUntil(async () => (await sender.ctx.interconnect.ping('peer-r'))?.instance === 'inst-b')
-    } finally {
-      await sender.dispose()
-      await aServ.close()
-      await receiverA.dispose()
-      await bServ.close()
-      await receiverB.dispose()
-    }
   })
 })

@@ -259,17 +259,6 @@ export type LinkMessage = {
   readonly resume?: boolean
 }
 
-/**
- * Handle to one established outbound WebSocket peer link. `close` tears the
- * socket down and cancels reconnection; `peer` records the dialed receiver.
- */
-export interface WebSocketLinkHandle {
-  /** The dialed peer origin. */
-  readonly peer: string
-  /** Terminate the socket and stop reconnect attempts. */
-  close(): void
-}
-
 /** Service config bound by the Composition loader. */
 export interface Config {
   /**
@@ -290,10 +279,12 @@ export interface Config {
    * instance's own link. An origin is the ONLY routing authority — `instanceId`
    * is never used to derive an address.
    *
-   * Fan-out of local lifecycle events goes to every live link, including an
-   * inbound peer that is not in this map.
-   * A runtime `subscribe(instanceId, origin)` can extend the map without
-   * restart; retuning the origin of an existing peer re-routes it.
+   * Fan-out of local lifecycle events goes to every live peer, including an
+   * inbound peer that is not in this map; an event travels over the link this
+   * instance dials, and an inbound socket is skipped only when a dialed link to
+   * the id that socket announced is already open. This map is the whole route
+   * surface: only the constructor reads it, so a peer link is added, removed,
+   * or re-pointed by restarting with different values.
    */
   readonly peers?: Record<string, string>
   /**
