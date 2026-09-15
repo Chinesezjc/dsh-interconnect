@@ -80,6 +80,8 @@ When a send/reply reports `delivered: false`, read `reason`:
   choose a live target instead.
 - `session-owned-by-subagent` — the session belongs to a subagent and its
   parent owns delivery; reach it through the parent.
+- `message-too-large` — the message is larger than the peer link can carry
+  (1 MiB once encoded); shorten the text instead of retrying it unchanged.
 - `no-sender-known` — a `reply` was attempted for a local session that never
   received a sender-carrying interconnect message, or whose recorded sender was
   forgotten by a receiver restart; establish contact with `interconnect_send`

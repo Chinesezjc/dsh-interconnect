@@ -2,6 +2,22 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.16（2026-09-15）
+
+跟随 #3243 分支新 head（`6992f71eaeef`）：本地拒绝超出链路帧上限的 `msg` 帧，并把这个失败原因变成对模型可见、可据以行动的措辞。
+
+### 变更
+
+- **发送前本地检查帧大小**：新增 `frameFitsLink(frame)`，`msgRequest` 先按 `JSON.stringify` 实测编码后的 `msg` 帧，超过 `MAX_LINK_FRAME_BYTES`（1 MiB）就**不写任何东西**，直接返回 `{ delivered: false, instance, reason: 'message-too-large' }`。此前超限帧会被写出去，对端 ws 收到超限帧即断链，调用方把「消息本来就装不下」读成传输失败、还会以为重试有用。
+- **新增失败原因 `message-too-large`**（`SendFailure` 联合类型新增一个成员，pre-1.0 属预期）：`send` 与 `reply` 的工具描述增加了这个分支的渲染——`the message is too large for the peer link (limit 1 MiB); shorten the text and try again` / 回复侧同义句；`interconnect_send` 的 `text` 参数描述也写明「编码后上限 1 MiB，超出以 `message-too-large` 拒绝」。
+- **skill 正文（`assets/dsh-interconnect.md`）** 的 `reason` 列表新增 `message-too-large` 条目，说明应改写文本而不是原样重试。该文件仍按**字节级复制**移植（本仓不 patch 它）。
+- **上游新增 2 条用例**（1:1 移植）：`tool-interconnect` 对 `message-too-large` 的 send/reply 渲染不出现 `retrying may succeed`；`interconnect.host` 对「刚好放下的消息送达、1 MiB 文本被拒且链路仍可用（后续小消息仍送达）」的端到端断言。
+
+### 验证
+
+- `pnpm run check`（typecheck + 166/166 tests + build）全绿（用例数 164 → 166）。
+- 对齐门禁：`no behavioural drift against 6992f71eaeef across 7 ported files, 1 byte-exact asset, 1 patch row set, and 1 optional-peer set`（含字节级复制的 `assets/dsh-interconnect.md`）。
+
 ## 0.11.15（2026-09-15）
 
 跟随 #3243 分支新 head（`7e671e5c72e9`）：把 `list` 应答的帧预算从固定常量改为按应答实测，并给入站 `reqId` 加上长度上限。

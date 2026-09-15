@@ -948,6 +948,44 @@ describe('interconnect delivery modes and wake', () => {
     }
   })
 
+  it('refuses an over-cap message locally and keeps the link up for one that fits', async () => {
+    const sender = await mounted('secret', new Set(['S-sess']), {}, 'followup', true, 'inst-big')
+    const sServ = await serveUpgrade(sender.upgrades)
+    const sUrl = `http://127.0.0.1:${String(sServ.port)}`
+    const receiver = await mounted('secret', new Set(['R-sess']), { 'inst-big': sUrl }, 'followup', true, 'inst-big-recv')
+    const rServ = await serveUpgrade(receiver.upgrades)
+    const rUrl = `http://127.0.0.1:${String(rServ.port)}`
+    linkRoute(sender.ctx.interconnect, 'inst-big-recv', rUrl)
+    try {
+      await wait(250)
+      // A text that leaves room for the frame's metadata still travels.
+      const fits = await sender.ctx.interconnect.send({
+        instanceId: 'inst-big-recv',
+        sessionId: 'R-sess',
+        text: 'x'.repeat(1024 * 1024 - 8192),
+      })
+      expect(fits.delivered).toBe(true)
+      // A text of the cap alone cannot fit once the frame's own fields are
+      // added; writing it would make the receiver's ws close the link instead
+      // of delivering anything.
+      const oversized = await sender.ctx.interconnect.send({
+        instanceId: 'inst-big-recv',
+        sessionId: 'R-sess',
+        text: 'x'.repeat(1024 * 1024),
+      })
+      expect(oversized).toEqual({ delivered: false, instance: 'inst-big-recv', reason: 'message-too-large' })
+      // Nothing was written, so the link is still there for a message that fits.
+      const after = await sender.ctx.interconnect.send({ instanceId: 'inst-big-recv', sessionId: 'R-sess', text: 'small' })
+      expect(after.delivered).toBe(true)
+      expect(receiver.methods.get('R-sess')).toEqual(['followup', 'followup'])
+    } finally {
+      await sender.dispose()
+      await rServ.close()
+      await receiver.dispose()
+      await sServ.close()
+    }
+  })
+
   it('refuses a woken delivery when the service is disposed during the wake', async () => {
     let releaseWake!: () => void
     const wakeGate = new Promise<void>((resolve) => { releaseWake = resolve })

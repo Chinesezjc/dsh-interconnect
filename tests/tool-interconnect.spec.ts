@@ -98,6 +98,21 @@ describe('tool-interconnect', () => {
     await dispose()
   })
 
+  it('renders an over-cap message as a size limit rather than a transport failure', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const send = ctx.tools.get('interconnect_send')!
+    const sendArgs = { instanceId: 'peer', sessionId: 'sess-x', text: 'x' }
+    const sendText = (send.output.render(sendArgs, { delivered: false, instance: 'peer', reason: 'message-too-large' }) as { text: string }[])[0]!.text
+    expect(sendText).toContain('too large')
+    expect(sendText).toContain('shorten')
+    // Retrying the same text cannot help, so the unreachable advice must not appear.
+    expect(sendText).not.toContain('retrying may succeed')
+    const reply = ctx.tools.get('interconnect_reply')!
+    const replyText = (reply.output.render({ text: 'x' }, { delivered: false, instance: 'peer', reason: 'message-too-large' }) as { text: string }[])[0]!.text
+    expect(replyText).toContain('too large')
+    await dispose()
+  })
+
   it('dispatches interconnect_send to the service and returns delivered/instance', async () => {
     const interconnect = fakeInterconnect()
     const { ctx, dispose } = await mounted(interconnect)

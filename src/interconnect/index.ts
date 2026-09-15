@@ -130,6 +130,13 @@ const MAX_REQUEST_ID_CHARS = 256
  */
 export const MAX_LISTED_SESSIONS = 100
 
+/**
+ * Whether one encoded link frame fits the cap both link halves enforce. An
+ * over-cap write makes the receiving ws close the link, so a frame whose size
+ * this instance already knows is refused before anything is written.
+ */
+const frameFitsLink = (frame: LinkFrame): boolean =>
+  Buffer.byteLength(JSON.stringify(frame), 'utf8') <= MAX_LINK_FRAME_BYTES
 /** Serialized size of one row inside a frame's `sessions` array: UTF-8 bytes plus its separating comma. */
 const rowBytes = (row: InterconnectSessionSummary): number =>
   Buffer.byteLength(JSON.stringify(row), 'utf8') + 1
@@ -577,7 +584,8 @@ export class InterconnectService extends Service {
    * Send a `msg` frame over the live link to a peer and resolve with its
    * correlated `msg-result`. Undefined when the peer has no live link here
    * (not configured, or the link is down) — sends can only address configured+
-   * connected peers by design.
+   * connected peers by design — and a `message-too-large` result when the
+   * encoded frame would not fit the link.
    */
   private async msgRequest(
     instanceId: string,
@@ -587,16 +595,26 @@ export class InterconnectService extends Service {
     const state = this.linkStates.get(instanceId)
     if (state === undefined || !state.writable()) return undefined
     const reqId = `m${++this.reqIdCounter}-${randomUUID()}`
-    const message: LinkMessage = {
-      kind,
-      sessionId: payload.sessionId,
-      text: payload.text,
-      ...(payload.sender === undefined ? {} : { sender: payload.sender }),
-      ...(payload.delivery === undefined ? {} : { delivery: payload.delivery }),
-      ...(payload.resume === undefined ? {} : { resume: payload.resume }),
+    const frame: LinkFrame = {
+      type: 'msg',
+      reqId,
+      message: {
+        kind,
+        sessionId: payload.sessionId,
+        text: payload.text,
+        ...(payload.sender === undefined ? {} : { sender: payload.sender }),
+        ...(payload.delivery === undefined ? {} : { delivery: payload.delivery }),
+        ...(payload.resume === undefined ? {} : { resume: payload.resume }),
+      },
+    }
+    // Refuse an over-cap frame locally: the peer's ws would close the link on
+    // receiving it, and the caller would read a transport failure for a message
+    // that could never have fit.
+    if (!frameFitsLink(frame)) {
+      return { delivered: false, instance: instanceId, reason: 'message-too-large' }
     }
     return this.waitForResult(reqId, 'msg', (failure) => {
-      const wrote = state.sendFrame({ type: 'msg', reqId, message })
+      const wrote = state.sendFrame(frame)
       /* v8 ignore next 1 -- writable() and sendFrame read the same socket.readyState synchronously, so this guard is unreachable. */
       if (!wrote) failure(new Error(`interconnect: peer link to ${instanceId} closed while sending`))
     }) as Promise<SendResult | undefined>

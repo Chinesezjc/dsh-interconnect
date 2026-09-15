@@ -99,7 +99,8 @@ export function apply(ctx: Context): void {
       text: {
         type: 'string',
         required: true,
-        description: 'Message text delivered to the peer session.',
+        description: 'Message text delivered to the peer session. At most 1 MiB once encoded: '
+          + 'a larger message is refused with reason "message-too-large".',
       },
       delivery: {
         type: 'string',
@@ -143,6 +144,9 @@ export function apply(ctx: Context): void {
             case 'session-owned-by-subagent':
               return `not delivered: "${_args.sessionId}" is a subagent's session on ${value.instance}`
                 + ' — its parent agent owns delivery, so reach it through that parent'
+            case 'message-too-large':
+              return 'not delivered: the message is too large for the peer link (limit 1 MiB);'
+                + ' shorten the text and try again'
             default:
               // When the caller already asked to wake this session, the only
               // honest next step is choosing a live target, not re-requesting
@@ -322,6 +326,9 @@ export function apply(ctx: Context): void {
         const text = ((): string => {
           if (value.reason === 'no-sender-known') {
             return 'not delivered: no sender identity is known to reply to'
+          }
+          if (value.reason === 'message-too-large') {
+            return 'not delivered: the reply is too large for the peer link (limit 1 MiB); shorten the text and try again'
           }
           if (value.reason === 'session-owned-by-subagent') {
             return 'not delivered: the recorded sender\'s session belongs to a subagent and its parent agent owns delivery'
