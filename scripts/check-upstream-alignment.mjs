@@ -46,6 +46,56 @@ function arg(name, fallback) {
 const WORKTREE = arg('--worktree', join(process.env.HOME ?? '', 'dsh-wt-ic-merge'))
 const REF = arg('--ref', 'origin/feat/merge-dsh-interconnect')
 
+/**
+ * The commit the verdict is about. `--ref` accepts a remote-tracking branch, and
+ * that ref is only as fresh as the worktree's last fetch, so the resolved commit
+ * is printed and used in the verdict: a verdict against a stale ref would
+ * otherwise name only the branch and read as current. Resolution failing (the
+ * worktree is missing, or the commit was never fetched there) exits before any
+ * comparison rather than reporting a verdict about nothing.
+ */
+let RESOLVED
+try {
+  RESOLVED = execFileSync('git', ['-C', WORKTREE, 'rev-parse', `${REF}^{commit}`], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+} catch (error) {
+  process.stderr.write(
+    `cannot resolve ${REF} in ${WORKTREE}: ${String(error.stderr ?? error.message).trim()}\n`
+    + `fetch that worktree first (git -C ${WORKTREE} fetch origin), or pass --ref <sha> and --worktree <dir>\n`,
+  )
+  process.exit(2)
+}
+const SHORT = RESOLVED.slice(0, 10)
+process.stdout.write(`comparing this mirror against ${REF} (${SHORT}) in ${WORKTREE}\n\n`)
+
+/**
+ * Read one upstream blob at the resolved ref.
+ * A ref that does not contain the ported paths — pre-merge `origin/master`, for
+ * example — is the answer to "has the merge landed yet?", so it is reported as
+ * that rather than as a git stack trace. Both text and binary reads go through
+ * here so neither can surface a raw error.
+ * @param path - the upstream path to read.
+ * @param binary - read bytes instead of text, for byte-compared assets.
+ * @returns the blob's text, or its bytes when `binary` is set.
+ */
+function upstreamBlob(path, binary = false) {
+  try {
+    return execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${path}`], {
+      ...(binary ? {} : { encoding: 'utf8' }),
+      maxBuffer: 32 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    process.stderr.write(
+      `cannot read ${path} at ${REF} in ${WORKTREE}: ${String(error.stderr ?? error.message).trim()}\n`
+      + 'that ref does not carry the upstream package, so there is nothing to compare against\n',
+    )
+    process.exit(2)
+  }
+}
+
 /** Upstream file → ported file, in the order the port documents them. */
 const SOURCE_PAIRS = [
   ['packages/experimental/interconnect/src/index.ts', 'src/interconnect/index.ts'],
@@ -399,15 +449,12 @@ function describeRows(rows) {
 
 let failed = false
 for (const [upstreamPath, portedPath] of PAIRS) {
-  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
+  const upstream = upstreamBlob(upstreamPath)
   const ported = readFileSync(join(ROOT, portedPath), 'utf8')
   const { missing, extra } = compare(upstream, ported)
   const drift = missing.length + extra.length
   if (drift === 0) {
-    process.stdout.write(`ok    ${portedPath} (skeleton identical to ${REF})\n`)
+    process.stdout.write(`ok    ${portedPath} (skeleton identical to ${SHORT})\n`)
     continue
   }
   failed = true
@@ -417,10 +464,7 @@ for (const [upstreamPath, portedPath] of PAIRS) {
 }
 
 for (const [upstreamPath, portedPath] of PAIRS) {
-  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
+  const upstream = upstreamBlob(upstreamPath)
   const allowed = new Set(RAW_ADAPTATIONS.get(portedPath) ?? [])
   const lines = readFileSync(join(ROOT, portedPath), 'utf8').split('\n')
   const local = portedPath === MIRRORED_BLOCK_PATH ? withoutMirroredBlock(lines) : lines
@@ -436,7 +480,7 @@ for (const [upstreamPath, portedPath] of PAIRS) {
   const missing = unaccounted(upstreamLines, local, allowed)
   const extra = unaccounted(local, upstreamLines, allowed)
   if (missing.length === 0 && extra.length === 0) {
-    process.stdout.write(`ok    ${portedPath} (raw text matches ${REF} outside ${String(allowed.size)} recorded adaptations)\n`)
+    process.stdout.write(`ok    ${portedPath} (raw text matches ${SHORT} outside ${String(allowed.size)} recorded adaptations)\n`)
     continue
   }
   failed = true
@@ -449,12 +493,10 @@ for (const [upstreamPath, portedPath] of PAIRS) {
 }
 
 for (const [upstreamPath, portedPath] of EXACT_PAIRS) {
-  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
-    maxBuffer: 32 * 1024 * 1024,
-  })
+  const upstream = upstreamBlob(upstreamPath, true)
   const ported = readFileSync(join(ROOT, portedPath))
   if (upstream.equals(ported)) {
-    process.stdout.write(`ok    ${portedPath} (byte-identical to ${REF})\n`)
+    process.stdout.write(`ok    ${portedPath} (byte-identical to ${SHORT})\n`)
     continue
   }
   failed = true
@@ -465,10 +507,7 @@ for (const [upstreamPath, portedPath] of EXACT_PAIRS) {
 }
 
 for (const [upstreamPath, portedPath] of PATCH_ID_PAIRS) {
-  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
+  const upstream = upstreamBlob(upstreamPath)
   const upstreamRows = patchRows(upstream)
   const portedRows = patchRows(readFileSync(join(ROOT, portedPath), 'utf8'))
   if (upstreamRows.size > 0 && describeRows(upstreamRows) === describeRows(portedRows)) {
@@ -531,10 +570,7 @@ function peerMeta(text) {
 }
 
 for (const [upstreamPath, portedPath] of PEER_META_PAIRS) {
-  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
+  const upstream = upstreamBlob(upstreamPath)
   const upstreamMeta = peerMeta(upstream)
   const portedMeta = peerMeta(readFileSync(join(ROOT, portedPath), 'utf8'))
   if (upstreamMeta === portedMeta) {
@@ -550,10 +586,7 @@ for (const [upstreamPath, portedPath] of PEER_META_PAIRS) {
 }
 
 for (const [upstreamPath, portedPath] of PEER_SUBSET_PAIRS) {
-  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
+  const upstream = upstreamBlob(upstreamPath)
   const upstreamPeers = peerNames(upstream)
   const localPeers = new Set(peerNames(readFileSync(join(ROOT, portedPath), 'utf8')))
   const missing = upstreamPeers.filter(name => !localPeers.has(name))
@@ -569,7 +602,7 @@ for (const [upstreamPath, portedPath] of PEER_SUBSET_PAIRS) {
 }
 
 if (failed) {
-  process.stdout.write(`\nbehavioural drift against ${REF} in ${WORKTREE}; port the change or extend the adaptation rules\n`)
+  process.stdout.write(`\nbehavioural drift against ${REF} (${SHORT}) in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift and no unrecorded text drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)
+process.stdout.write(`\nno behavioural drift and no unrecorded text drift against ${REF} (${SHORT}) across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)

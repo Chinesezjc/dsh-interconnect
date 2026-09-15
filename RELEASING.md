@@ -4,13 +4,13 @@
 
 ## 一、跟随上游 head 核对
 
-上游是私有仓 `deepseek-harness/deepseek-harness` 的 `feat/merge-dsh-interconnect` 分支（合并后为 master）。核对用本仓的脚本，它按**代码骨架**比较，而不是文本比较：
+上游是私有仓 `deepseek-harness/deepseek-harness` 的 `feat/merge-dsh-interconnect` 分支（合并后为 master）。核对用本仓的脚本，它先比**代码骨架**、再比**原始文本（注释计入）**：
 
 ```sh
 node scripts/check-upstream-alignment.mjs --ref <上游 head sha>
 ```
 
-默认读取 `~/dsh-wt-ic-merge` 工作区。它检查六类不变量：
+默认读取 `~/dsh-wt-ic-merge` 工作区。开头会打印**解析到的提交**（`comparing this mirror against <ref> (<sha>)`）：`--ref` 可以给分支名，而分支在该工作区里的新鲜度只取决于上次 fetch，所以要拿这个 sha 与远端 head 对一下，别把「工作区还没 fetch」读成「上游没动」。工作区里取不到该提交时脚本以 exit 2 停止，不会给结论。指向**不含上游包**的 ref（例如未合入时的 `origin/master`）也 exit 2 并指出缺哪个文件——这正是「合并落地了吗」这个问题的答案。它检查六类不变量：
 
 1. **四个源文件 + 三个 spec**：剥掉注释与 import 行后的骨架必须逐行一致（`ok … (skeleton identical)`）。
 2. **同一批文件的原始文本（注释计入）**：除脚本里 `RAW_ADAPTATIONS` 记录在案的适配行以外，必须逐字一致（`ok … (raw text matches … outside N recorded adaptations)`）。注释与代码一样从上游逐字移植，所以「上游改了注释、本仓只移植了一部分」会在这里判红 —— 骨架那一遍剥掉注释，看不见这种漂移。该遍按**出现次数**比较（不是集合）并忽略空行；`index.ts` 里本仓独有的镜像块（子代理归属判定与 `assertNever`）由锚点整段排除，锚点找不到就判红而不是静默跳过。
