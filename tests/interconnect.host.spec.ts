@@ -673,21 +673,29 @@ describe('interconnect lifecycle event fan-out', () => {
     }
   })
 
-  it('attributes the dialed peer by the id it announced, not only by its configured key', async () => {
+  it('warns when a dialed peer announces an id other than its configured key', async () => {
     const receiver = await mounted('secret', new Set([]))
+    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
+    const mismatchWarns = (): number =>
+      warn.mock.calls.filter(([message]) => String(message).includes('announces')).length
     const events = (socket: { sent: string[] }): string[] => socket.sent.filter(line => line.includes('"type":"event"'))
     const dialed = fakeSocket()
     const inbound = fakeSocket()
-    // The peer is listed under a local key (`peer-b`) but announces its own id
-    // (`inst-b`) on both links, so the inbound duplicate is attributable through
-    // that announcement rather than through the configured key.
+    // The peer is listed under `peer-b` but announces `inst-b`. Suppression is
+    // keyed on local configuration, so the announcement cannot silence another
+    // peer's link: this instance warns once and keeps sending to both sockets.
     attachDialedSocket(receiver.service, dialed.socket, 'peer-b')
     attachSocket(receiver.service, inbound.socket)
     dialed.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'inst-b' }))
     inbound.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'inst-b' }))
+    expect(mismatchWarns()).toBe(1)
+    // Re-announcing on the same socket does not warn again.
+    dialed.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'inst-b' }))
+    expect(mismatchWarns()).toBe(1)
     receiver.ctx.emit('agent/created', agentPayload('s1'))
     expect(events(dialed.socket)).toHaveLength(1)
-    expect(events(inbound.socket)).toHaveLength(0)
+    expect(events(inbound.socket)).toHaveLength(1)
+    warn.mockRestore()
     await receiver.dispose()
   })
 

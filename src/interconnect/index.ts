@@ -355,6 +355,8 @@ export class InterconnectService extends Service {
   private readonly peerOf = new WeakMap<WebSocket, string>()
   /** Configured peer an outbound dial owns a socket for; absent on inbound sockets. */
   private readonly dialedPeerOf = new WeakMap<WebSocket, string>()
+  /** Dialed sockets already reported as announcing an id other than their configured key. */
+  private readonly mismatchWarned = new WeakSet<WebSocket>()
   /** Sender each local session last received a send from, keyed by local session id. */
   private readonly senders = new Map<string, SenderIdentity>()
   /** In-flight frames sent over a peer link, keyed by `reqId`, awaiting a correlated result. */
@@ -707,12 +709,12 @@ export class InterconnectService extends Service {
    * dialed link plus the peer's inbound one), so one event must leave over one
    * of them. Which one is decided by local ownership, not by the peer: a dialed
    * socket is a configured peer's link and always sends. An inbound socket is
-   * skipped only when an open dialed link covers the id that socket itself
-   * announced — either because `Config.peers` lists that peer under the id, or
-   * because the peer announced the id over that dialed link — so an
-   * announcement can suppress nothing but a duplicate the controlled link
-   * already carries. An impostor cannot drop an event for a peer, and without a
-   * dialed link every inbound socket receives it.
+   * skipped only when this instance has an open dialed link configured under
+   * the id that socket itself announced, so a self-reported announcement can
+   * never silence another peer's link; with no such dialed link every inbound
+   * socket receives the event. A peer listed under a key other than the id it
+   * announces is warned about once per link, because then its own inbound
+   * socket is not attributable and the peer receives each event twice.
    *
    * That holds once a peer's announcement has been seen. Between this
    * instance's dialed link opening and the peer's `hello` arriving on its
@@ -731,14 +733,7 @@ export class InterconnectService extends Service {
         continue
       }
       const dialedPeer = this.dialedPeerOf.get(socket)
-      if (dialedPeer === undefined) continue
-      covered.add(dialedPeer)
-      // The configured key is a local name, and a deployment may list a peer
-      // under one that differs from the id the peer announces. The id the peer
-      // announced over this link is the other name the same peer is known by,
-      // so an inbound socket of that peer is attributable through either.
-      const announced = this.peerOf.get(socket)
-      if (announced !== undefined) covered.add(announced)
+      if (dialedPeer !== undefined) covered.add(dialedPeer)
     }
     for (const socket of this.sockets) {
       if (this.dialedPeerOf.get(socket) === undefined) {
@@ -1182,6 +1177,13 @@ export class InterconnectService extends Service {
     const frame = parsed as LinkFrame
     if (frame.type === 'hello') {
       this.peerOf.set(socket, frame.sender)
+      const dialedPeer = this.dialedPeerOf.get(socket)
+      if (dialedPeer !== undefined && dialedPeer !== frame.sender && !this.mismatchWarned.has(socket)) {
+        this.mismatchWarned.add(socket)
+        this.ctx.logger.warn(
+          `interconnect: peer configured as ${dialedPeer} announces ${frame.sender}; list a peer under the instanceId it announces, or the duplicate inbound link is not recognised`,
+        )
+      }
       return
     }
     if (frame.type === 'event') {

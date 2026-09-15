@@ -2,6 +2,23 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.18（2026-09-15）
+
+跟随 #3243 分支新 head（`4ebda9c4fe8c`）：**撤回** 0.11.17 引入的「按对端 announce 的 id 归属拨号链路」，改成对「配置键与 announce 值不一致」记一次警告。
+
+### 变更
+
+- **为什么撤回**：0.11.17 把对端在 `hello` 里 announce 的 id 也加入 `covered`，本意是让配置键与自称不一致的部署也能归属对端。但 announce 值是**对端自报**的：它因此能抑制**另一个** peer 的入站 socket，等于让自报身份具备静默别人链路的能力 —— 这与 `broadcast` 注释里「announcement can suppress nothing but a duplicate the controlled link already carries」的前提冲突。现在 `covered` **只**收配置键（`Config.peers` 的 key），没有拨号链路覆盖时每个入站 socket 都会收到事件。
+- **不一致改为警告，不再静默**：新增 `mismatchWarned: WeakSet<WebSocket>`；`hello` 处理时若该拨号链路的配置键与对端 announce 的 id 不同，就**每条链路记一次** warn：`peer configured as <key> announces <sender>; list a peer under the instanceId it announces, or the duplicate inbound link is not recognised`。这样代价（该 peer 每个事件收到两份）是可见的，而不是被自报值悄悄吸收。
+- **JSDoc 同步改写**：`broadcast` 的注释改为描述新规则（"a self-reported announcement can never silence another peer's link"）。
+- **上游改写 1 条用例**（1:1 移植）：原先断言「按 announce 的 id 归属拨号对端」的用例，改为断言「配置键与 announce 不一致时产生一次警告」。
+
+### 验证
+
+- `pnpm run check`（typecheck + 167/167 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against 4ebda9c4fe8c across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`（`assets/dsh-interconnect.md` 未变）。
+- 本仓三台部署的 `peers` 键与各自 announce 的 instanceId 一致（`momoairi`/`ci-server`/`ci-windows`），因此不会触发该警告。
+
 ## 0.11.17（2026-09-15）
 
 跟随 #3243 分支新 head（`10625dbaf770`）：给 `instanceId` 加上与 `reqId` 对齐的长度上限，据此删掉列表应答里「信封都放不下」的分支；把事件订阅交给 Cordis 的 fiber 生命周期；并让拨号链路按对端**announce 的 id** 也能归属对端。
