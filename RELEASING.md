@@ -158,6 +158,8 @@ scripts/verify-deployment.sh CI-Server 3080 /home/ubuntu/deepseek-harness/node_m
    ```
    与本仓 `pnpm run check` 产物、`assets/`、`cordis.patch.yml`、`dsh.plugin.json` 的 hash 逐个比对。构建是确定性的，因此**同一版本下这几个 hash 应在仓库与三台部署上完全一致**；`dsh.plugin.json` 的 hash 同时证明已装版本就是当前仓库版本。这些值**每个版本都会变**（判定规则不变，数字只是当下基线），实测 0.11.20（三台全部逐字一致）：`lib/index.js fa8f72b78e1d14b0`、`lib/interconnect/index.js 946fa483e8ed1b8c`、`lib/tool-interconnect/index.js 2353740801733d92`、`lib/skill-interconnect/index.js ac7f6b62698c99b2`、`lib/types/interconnect/types.d.ts 4814ed410b65d7e0`、`assets/dsh-interconnect.md 9ac2257814a68a23`、`cordis.patch.yml b324e2a6f00f7515`、`dsh.plugin.json 7f6bb5c288125440`（均为 sha256 前 16 位；0.11.18 的基线是 `b672b438532ad818`/`62ac01e8cf0865a8`/`2ade00fd00a692e6`/`ac7f6b62698c99b2`/`b4daf02189b15291`/`b324e2a6f00f7515`/`6855184fc9dfeab9`）。
    - **例外：发布之后又移植了注释时，`lib/types/**/*.d.ts` 会与已发布包不同**。注释在 JS 产物里被剥掉（`lib/**/index.js` 不变），但会**保留进 `.d.ts`**：0.11.18 发布后补的一处 `types.ts` JSDoc 曾让本仓 `.d.ts` 变成 `1d709beb309735d9` 而线上仍是 `ca4f433ff508fd09`；该注释已随 **0.11.19/0.11.20 发出**，所以现在两边都是 `4814ed410b65d7e0`。比对时先确认「本仓是否在发布后改过源文件」，别把它当成安装损坏。
+   - **更常见的一条例外：`.map` 里嵌了原始源码，所以任何注释改动都会让 `.map` 与已发布包不同**（`.js`/`.d.ts` 不受影响）。实测：head `fc1d297290` 把 `heartbeatTimer` 上方那段注释**移动**了位置，本仓 `lib/interconnect/index.js.map` = `87f27089008c8c3c`，而线上 0.11.20 仍是 `21996ddfb76beedf` —— 把两个 map 的 `sourcesContent[0]` 取出来看行号即可确认差异就是那次移动（本仓注释 425 行 / `heartbeatTimer` 428 行；线上 `heartbeatTimer` 425 行 / 注释 443 行）。
+     因此**上面的 hash 链刻意不含 `.map`**：判断「注释型 head 要不要发版」时，链内文件全同就说明**行为等价**（`.js`/`.d.ts`/正文/patch/manifest 都没变），发行与否是取舍而非正确性问题——注释改动会让已发布包的 `.map` 与仓库不再逐字一致，但那只是调试元数据。
 
 ### 坑二：devDependency 不能写本机路径
 
