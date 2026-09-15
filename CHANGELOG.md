@@ -2,6 +2,22 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.21（2026-09-15）
+
+跟随 #3243 分支新 head（`03fb844ea1`）：companion skill 不再声明 `resourceBase`，因为它会把本机绝对路径写进 skill 工具结果。
+
+### 变更
+
+- **`skill-interconnect` 的候选不再带 `resourceBase`**：删掉 `RESOURCE_BASE`（`{kind: 'directory', path: fileURLToPath(new URL('../../assets/', import.meta.url))}`）与 `node:url` 的 `fileURLToPath` 引入，候选与 `get()` 返回的 `SkillDefinition` 都不再带该字段。调用 `skill({name:'dsh-interconnect'})` 时，skill 运行时对 `resourceBase !== undefined` 走 `Base directory for this skill: <绝对路径>` 分支；本插件的 `assets/` 目录里只有已内联进 `<skill_instructions>` 的正文，所以这条提示只暴露了检出目录的绝对路径——一个换机器就无法重放的值（上游在把手场景里为 skill 正文录快照时因此判红）。去掉后走 provider 托管分支，结果文案是 `Resources for this skill are managed by provider "dsh-interconnect".`。
+- **同一 head 的另外两个 commit 只影响 monorepo 侧**：`src/interconnect/index.ts` 的改动是 JSDoc 合并（`shape` 改述为 `union`），构建产物逐字节不变（`lib/interconnect/index.js` 仍是 `946fa483e8ed1b8c`）；`scripts/snapshot-http-fixtures.spec.ts`、`snapshots/**` 是 monorepo 快照夹具，不在镜像范围内。
+
+### 验证
+
+- `pnpm run check`（typecheck + 167/167 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against 03fb844ea1 across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`；`scripts/port-upstream-change.mjs --from fc1d297290 --to 03fb844ea1` 有 2 个 hunk 被拒（都是相对路径适配造成的上下文差异），手工按适配后的上下文解掉。
+- 构建产物与 0.11.20 比对：8 个受追踪产物里只有 `lib/skill-interconnect/index.js` 变了（`ac7f6b62698c99b2` → `f3503a044b6791e9`），其余 7 个逐字节相同，确认这是本版唯一的运行时改动。
+- 部署影响：三台（MomoiAiri、CI-Server、CI-Server-Windows）从 0.11.20 升到 0.11.21。
+
 ## 0.11.20（2026-09-15）
 
 跟随 #3243 分支新 head（`0454d30ab5fb`）：把 `no-sender-known` 从「接收方可以回答的线缆原因」里删掉，与 0.11.19 补的文档保持一致。

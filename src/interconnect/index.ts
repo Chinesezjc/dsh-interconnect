@@ -301,8 +301,12 @@ const querySchema = z.union([
   z.object({ kind: z.const('event').required(), notification: notificationSchema.required() }),
 ])
 
-/** Wire shape of one `send` answer: success carries the mode used, failure must carry the reason. */
-/** Reasons one receiver can answer a `msg` with; the reply-side reasons stay local. */
+/**
+ * Wire union of one `send` answer: the success branch carries the mode the
+ * receiver used, and the failure branches carry only the reasons a receiver can
+ * answer with — the reply-side reasons (`message-too-large`, `no-sender-known`)
+ * are produced locally and never cross the link.
+ */
 const msgResultSchema = z.union([
   z.object({ delivered: z.const(true).required(), instance: z.string().required(), delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]) }),
   z.object({ delivered: z.const(false).required(), instance: z.string().required(), reason: z.union([

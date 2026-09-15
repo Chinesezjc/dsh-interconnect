@@ -14,6 +14,7 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { Agent, SessionStartSource } from '@deepseek-ai/dsh-agent'
 import InterconnectService, { INTERCONNECT_TOKEN_REF, linkUrl } from '../src/interconnect/index.ts'
 import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'
+import type { LinkFrame } from '../src/interconnect/types.ts'
 import WebSocket, { WebSocketServer } from 'ws'
 
 /** Structural httpServer fake recording the upgrade registries this service touches. */
@@ -867,7 +868,7 @@ describe('interconnect delivery modes and wake', () => {
     await receiver.dispose()
   })
 
-  it('reports resume-failed when the agent lookup resolves nothing', async () => {
+  it('reports session-not-live when the agent lookup resolves nothing', async () => {
     const receiver = await mounted('secret', new Set([]), {}, 'followup', true, 'test-instance', {
       provides: {
         typert: { lookups: { get: () => ({ resolve: async () => undefined }) } },
@@ -1024,20 +1025,31 @@ describe('interconnect delivery modes and wake', () => {
     linkRoute(sender.ctx.interconnect, 'inst-big-recv', rUrl)
     try {
       await wait(250)
-      // A text that leaves room for the frame's metadata still travels.
+      // The accepted and refused texts are adjacent, so the pair pins the cap
+      // byte-exactly instead of leaving slack. With an empty text and the same
+      // `m<counter>-<uuid>` request id length, this placeholder carries only
+      // the fixed fields every send frame adds around the text.
+      const frameOverhead = ((): number => {
+        const placeholder: LinkFrame = {
+          type: 'msg',
+          reqId: `m1-${'0'.repeat(36)}`,
+          message: { kind: 'send', sessionId: 'R-sess', text: '' },
+        }
+        return Buffer.byteLength(JSON.stringify(placeholder), 'utf8')
+      })()
+      const exactText = 'x'.repeat(1024 * 1024 - frameOverhead)
       const fits = await sender.ctx.interconnect.send({
         instanceId: 'inst-big-recv',
         sessionId: 'R-sess',
-        text: 'x'.repeat(1024 * 1024 - 8192),
+        text: exactText,
       })
       expect(fits.delivered).toBe(true)
-      // A text of the cap alone cannot fit once the frame's own fields are
-      // added; writing it would make the receiver's ws close the link instead
-      // of delivering anything.
+      // One byte more than the cap cannot be written: the peer's ws would close
+      // the link instead of delivering anything.
       const oversized = await sender.ctx.interconnect.send({
         instanceId: 'inst-big-recv',
         sessionId: 'R-sess',
-        text: 'x'.repeat(1024 * 1024),
+        text: `${exactText}x`,
       })
       expect(oversized).toEqual({ delivered: false, instance: 'inst-big-recv', reason: 'message-too-large' })
       // Nothing was written, so the link is still there for a message that fits.

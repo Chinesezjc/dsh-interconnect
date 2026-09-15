@@ -1,6 +1,5 @@
 /** Companion skill plugin: registers the bundled dsh-interconnect skill only when the interconnect service is present. */
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import { describe, expect, it } from 'vitest'
@@ -27,7 +26,6 @@ describe('skill-interconnect', () => {
 
   it('registers the bundled dsh-interconnect skill', async () => {
     const { ctx, dispose } = await mounted()
-    const resourcePath = fileURLToPath(new URL('../assets/', import.meta.url))
     const listed = await ctx.skills.list()
     expect(listed).toEqual([{
       name: 'dsh-interconnect',
@@ -35,7 +33,6 @@ describe('skill-interconnect', () => {
       invocation: { modelInvocable: true, userInvocable: true },
       provider: 'dsh-interconnect',
       source: 'bundled',
-      resourceBase: { kind: 'directory', path: resourcePath },
     }])
     await dispose()
     expect(await ctx.skills.list()).toEqual([])
