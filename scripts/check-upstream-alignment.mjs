@@ -10,11 +10,13 @@
  * ported line for line. Everything else must match upstream code exactly, so a
  * test added upstream has to arrive here too.
  *
- * The comparison is made on comment-stripped, import-stripped "skeletons", with
- * the mirrored blocks removed and the mirrored identifier renamed. A difference
- * that survives that normalisation is behavioural drift and fails the check;
- * comment wording is reported but does not fail, because comments carry no
- * behaviour and the standalone package deliberately documents itself.
+ * Two passes run over every ported file. The first compares comment-stripped,
+ * import-stripped "skeletons", with the mirrored blocks removed and the mirrored
+ * identifier renamed: a difference that survives that normalisation is
+ * behavioural drift. The second compares the raw text with comments included and
+ * requires every difference to be a recorded adaptation. Comments are ported
+ * from upstream like code, so a comment that no longer matches upstream is
+ * drift: the skeleton pass strips comments and therefore cannot see one.
  *
  * Usage:
  *   node scripts/check-upstream-alignment.mjs [--worktree <dir>] [--ref <git-ref>]
@@ -214,6 +216,135 @@ function compare(upstreamText, portedText) {
 }
 
 /**
+ * Raw differences that are documented adaptations, keyed by ported path. These
+ * are the only lines allowed to differ once comments count. Everything else must
+ * match upstream text, so an upstream comment edit that is ported incompletely
+ * fails here instead of passing as "no behavioural drift". A line is listed when
+ * it is local-only or upstream-only in the raw comparison; the mirrored block
+ * itself is not listed because {@link withoutMirroredBlock} removes it whole.
+ */
+const RAW_ADAPTATIONS = new Map([
+  ['src/interconnect/index.ts', [
+    ' * @module @deepseek-ai/dsh-experimental-interconnect',
+    ' * @module dsh-interconnect',
+    "import { createHash, timingSafeEqual as constantTimeEqual } from 'node:crypto'",
+    "import { createHash, randomUUID, timingSafeEqual as constantTimeEqual } from 'node:crypto'",
+    "// The Host's own subagent-ownership predicate, reused rather than reimplemented:",
+    "// this is a safety rule, and a local copy of it would drift from the Host's.",
+    "import { hasApiSessionSubagentOwner } from '@deepseek-ai/dsh-api-session-controller'",
+    '// Loads the `RemoteErrorDetailsMap` augmentation that declares `session/agent-busy`,',
+    '// the code the Host raises when a resume hits a subagent-owned session. Type-only:',
+    '// no runtime dependency, and this subpath exists in every host revision in use.',
+    "import type {} from '@deepseek-ai/dsh-api-session-controller/types'",
+    "import { randomUUID } from '@deepseek-ai/dsh-util-crypto'",
+    "import { assertNever } from '@deepseek-ai/dsh-util-values'",
+    '      .filter(agent => !hasApiSessionSubagentOwner(this.ctx, agent.session, agent))',
+    '      .filter(agent => !isSessionOwnedBySubagent(this.ctx, agent.session, agent))',
+    '    if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {',
+    '    if (isSessionOwnedBySubagent(this.ctx, agent.session, agent)) {',
+  ]],
+  ['src/interconnect/types.ts', [
+    ' * Wire contracts for `@deepseek-ai/dsh-experimental-interconnect`.',
+    ' * Wire contracts for `dsh-interconnect`.',
+    ' * @module @deepseek-ai/dsh-experimental-interconnect',
+    ' * @module dsh-interconnect',
+  ]],
+  ['src/tool-interconnect/index.ts', [
+    "import { MAX_LISTED_SESSIONS } from '@deepseek-ai/dsh-experimental-interconnect'",
+    "import { MAX_LISTED_SESSIONS } from '../interconnect/index.ts'",
+  ]],
+  ['src/skill-interconnect/index.ts', [
+    "import type {} from '@deepseek-ai/dsh-experimental-interconnect'",
+    "import type {} from '../interconnect/index.ts'",
+    "const SKILL_BODY_URL = new URL('../assets/dsh-interconnect.md', import.meta.url)",
+    "const SKILL_BODY_URL = new URL('../../assets/dsh-interconnect.md', import.meta.url)",
+  ]],
+  ['tests/interconnect.host.spec.ts', [
+    "import InterconnectService, { INTERCONNECT_TOKEN_REF, linkUrl } from '../src/index.ts'",
+    "import InterconnectService, { INTERCONNECT_TOKEN_REF, linkUrl } from '../src/interconnect/index.ts'",
+    "import type { DeliveryMode, EventNotification } from '../src/index.ts'",
+    "import type { DeliveryMode, EventNotification } from '../src/interconnect/index.ts'",
+    "import type { LinkFrame } from '../src/types.ts'",
+    "import type { LinkFrame } from '../src/interconnect/types.ts'",
+  ]],
+  ['tests/tool-interconnect.spec.ts', [
+    "import * as toolInterconnect from '../src/index.ts'",
+    "import * as toolInterconnect from '../src/tool-interconnect/index.ts'",
+    "import { MAX_LISTED_SESSIONS } from '@deepseek-ai/dsh-experimental-interconnect'",
+    "import { MAX_LISTED_SESSIONS } from '../src/interconnect/index.ts'",
+    "import type { InterconnectService, SendResult } from '@deepseek-ai/dsh-experimental-interconnect'",
+    "import type { InterconnectService, SendResult } from '../src/interconnect/index.ts'",
+  ]],
+  ['tests/skill-interconnect.spec.ts', [
+    "import * as skillInterconnect from '../src/index.ts'",
+    "import * as skillInterconnect from '../src/skill-interconnect/index.ts'",
+    "import type { InterconnectService } from '@deepseek-ai/dsh-experimental-interconnect'",
+    "import type { InterconnectService } from '../src/interconnect/index.ts'",
+  ]],
+])
+
+/** The ported file that carries the macOS-independent local-only mirrored block. */
+const MIRRORED_BLOCK_PATH = 'src/interconnect/index.ts'
+
+/**
+ * Anchors of the local-only block in `src/interconnect/index.ts`: the Host's
+ * subagent-ownership predicate and `assertNever`, which the Host does not export
+ * to plugins. The block has no upstream counterpart, so the raw pass removes it
+ * before comparing. It is located by content rather than by line number, and a
+ * missing anchor fails the check rather than silently skipping the removal.
+ */
+const MIRRORED_BLOCK = {
+  body: /Mirror of the Host's subagent-ownership predicate/u,
+  open: /^\/\*\*$/u,
+  tail: /interconnect: unhandled variant/u,
+  close: /^\}$/u,
+}
+
+/**
+ * Remove the mirrored block so its lines are not reported as unrecorded drift.
+ * @param lines - the local file's lines.
+ * @returns the lines without the block, or null when an anchor is absent.
+ */
+function withoutMirroredBlock(lines) {
+  const body = lines.findIndex(line => MIRRORED_BLOCK.body.test(line))
+  const tail = lines.findIndex(line => MIRRORED_BLOCK.tail.test(line))
+  if (body === -1 || tail === -1) return null
+  let open = body
+  while (open >= 0 && !MIRRORED_BLOCK.open.test(lines[open])) open -= 1
+  let close = tail
+  while (close < lines.length && !MIRRORED_BLOCK.close.test(lines[close])) close += 1
+  if (open < 0 || close >= lines.length) return null
+  return [...lines.slice(0, open), ...lines.slice(close + 1)]
+}
+
+/**
+ * Lines present in `left` more often than in `right`, ignoring allowed text and
+ * blank lines. Occurrence counts rather than a set: a duplicated comment line
+ * dropped on one side is drift a set difference cannot see. Blank lines carry no
+ * content and are ignored so that removing the mirrored block leaves no artifact.
+ * @param left - the lines to account for.
+ * @param right - the lines that may account for them.
+ * @param allowed - exact line texts that are recorded adaptations.
+ * @returns the unaccounted lines.
+ */
+function unaccounted(left, right, allowed) {
+  const skip = line => line.trim() === '' || allowed.has(line)
+  const counts = new Map()
+  for (const line of right) {
+    if (skip(line)) continue
+    counts.set(line, (counts.get(line) ?? 0) + 1)
+  }
+  const out = []
+  for (const line of left) {
+    if (skip(line)) continue
+    const remaining = counts.get(line) ?? 0
+    if (remaining > 0) counts.set(line, remaining - 1)
+    else out.push(line)
+  }
+  return out
+}
+
+/**
  * The retirement plan repoints a deployment profile at the monorepo's
  * `interconnect-profile` layer while keeping that profile's own override rows,
  * which keeps working only while both patches insert the same row ids with the
@@ -283,6 +414,38 @@ for (const [upstreamPath, portedPath] of PAIRS) {
   process.stdout.write(`DRIFT ${portedPath}: ${String(missing.length)} upstream lines absent, ${String(extra.length)} local lines unaccounted\n`)
   for (const line of missing.slice(0, 20)) process.stdout.write(`  - ${line}\n`)
   for (const line of extra.slice(0, 20)) process.stdout.write(`  + ${line}\n`)
+}
+
+for (const [upstreamPath, portedPath] of PAIRS) {
+  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const allowed = new Set(RAW_ADAPTATIONS.get(portedPath) ?? [])
+  const lines = readFileSync(join(ROOT, portedPath), 'utf8').split('\n')
+  const local = portedPath === MIRRORED_BLOCK_PATH ? withoutMirroredBlock(lines) : lines
+  if (local === null) {
+    failed = true
+    process.stdout.write(
+      `DRIFT ${portedPath}: the mirrored block anchors are absent from ${MIRRORED_BLOCK_PATH}; `
+      + 'the raw pass cannot tell the local-only block from unported upstream text\n',
+    )
+    continue
+  }
+  const upstreamLines = upstream.split('\n')
+  const missing = unaccounted(upstreamLines, local, allowed)
+  const extra = unaccounted(local, upstreamLines, allowed)
+  if (missing.length === 0 && extra.length === 0) {
+    process.stdout.write(`ok    ${portedPath} (raw text matches ${REF} outside ${String(allowed.size)} recorded adaptations)\n`)
+    continue
+  }
+  failed = true
+  process.stdout.write(
+    `DRIFT ${portedPath}: ${String(missing.length)} upstream line(s) not ported, `
+    + `${String(extra.length)} local line(s) not a recorded adaptation\n`,
+  )
+  for (const line of missing.slice(0, 12)) process.stdout.write(`  - ${line}\n`)
+  for (const line of extra.slice(0, 12)) process.stdout.write(`  + ${line}\n`)
 }
 
 for (const [upstreamPath, portedPath] of EXACT_PAIRS) {
@@ -409,4 +572,4 @@ if (failed) {
   process.stdout.write(`\nbehavioural drift against ${REF} in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)
+process.stdout.write(`\nno behavioural drift and no unrecorded text drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)

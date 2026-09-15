@@ -10,16 +10,17 @@
 node scripts/check-upstream-alignment.mjs --ref <上游 head sha>
 ```
 
-默认读取 `~/dsh-wt-ic-merge` 工作区。它检查五类不变量：
+默认读取 `~/dsh-wt-ic-merge` 工作区。它检查六类不变量：
 
 1. **四个源文件 + 三个 spec**：剥掉注释与 import 行后的骨架必须逐行一致（`ok … (skeleton identical)`）。
-2. **skill 正文** `assets/dsh-interconnect.md`：与上游**逐字节一致** —— 它是模型可见内容，一个字符的改动都算行为变化（永远字节复制，绝不用 patch）。
-3. **`cordis.patch.yml` 的插入行**：行 id 与每行 `config` 的键必须与上游 `interconnect-profile` 层一致（部署 profile 按行 id 覆盖 `instanceId`/`peers`）。
-4. **`peerDependenciesMeta`**：必须与上游`packages/experimental/interconnect/package.json` 的那张表完全一致（把某个 peer 标成可选是安装可见行为）。
-5. **peer 子集**：上游声明的每个 peer 都必须出现在本仓 `package.json` 的 peers 里（只断言 `上游 ⊆ 本仓`；本仓 peer 更多是设计使然 —— 它镜像两个 util 包而不依赖它们，并把上游的 dependency 当 peer 声明）。
+2. **同一批文件的原始文本（注释计入）**：除脚本里 `RAW_ADAPTATIONS` 记录在案的适配行以外，必须逐字一致（`ok … (raw text matches … outside N recorded adaptations)`）。注释与代码一样从上游逐字移植，所以「上游改了注释、本仓只移植了一部分」会在这里判红 —— 骨架那一遍剥掉注释，看不见这种漂移。该遍按**出现次数**比较（不是集合）并忽略空行；`index.ts` 里本仓独有的镜像块（子代理归属判定与 `assertNever`）由锚点整段排除，锚点找不到就判红而不是静默跳过。
+3. **skill 正文** `assets/dsh-interconnect.md`：与上游**逐字节一致** —— 它是模型可见内容，一个字符的改动都算行为变化（永远字节复制，绝不用 patch）。
+4. **`cordis.patch.yml` 的插入行**：行 id 与每行 `config` 的键必须与上游 `interconnect-profile` 层一致（部署 profile 按行 id 覆盖 `instanceId`/`peers`）。
+5. **`peerDependenciesMeta`**：必须与上游`packages/experimental/interconnect/package.json` 的那张表完全一致（把某个 peer 标成可选是安装可见行为）。
+6. **peer 子集**：上游声明的每个 peer 都必须出现在本仓 `package.json` 的 peers 里（只断言 `上游 ⊆ 本仓`；本仓 peer 更多是设计使然 —— 它镜像两个 util 包而不依赖它们，并把上游的 dependency 当 peer 声明）。
 
-脚本对注释措辞差异**不判红**（本包自己写文档），任何它判红的差异都是行为漂移，应当移植而不是调整脚本 —— 除非确实新增了一处适配点（见下节）。汇总行会打印各集合的条数，例如
-`no behavioural drift against <sha> across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`。
+脚本判红的任何差异都是漂移，应当移植而不是调整脚本 —— 除非确实新增了一处适配点（见下节），那就把该行按上游/本仓两侧原文加进 `RAW_ADAPTATIONS`。汇总行会打印各集合的条数，例如
+`no behavioural drift and no unrecorded text drift against <sha> across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`。
 
 新增检查时**必须构造负例**（删掉被守护的东西，确认脚本红并 exit 1，再还原）—— 没有负例的检查可能只是给失效机制盖绿章。
 
@@ -50,7 +51,7 @@ node scripts/port-upstream-change.mjs --from <旧 head> --to <新 head>
 
 该脚本按**显式映射表**处理四个源文件、三个 spec 与 skill 正文（正文**字节复制**、绝不 patch），自动删掉 `patch` 的 `.orig` 备份、列出所有 `.rej`、列出它不管的上游改动（docs/i18n 与本仓无关，`package.json` 的 `peerDependenciesMeta`/peer 集合要手工改），最后跑一次对齐门禁；**有任何 hunk 被拒就以非零退出**。
 
-相比手工按门禁输出挑文件，它有两个优势：不会漏掉**只改注释**的文件（门禁忽略注释，手工挑文件时会漏，留下将来 hunk 上下文不匹配的隐患），也不会因映射写错而把 `tool-interconnect` 的补丁打到 `interconnect` 上。
+相比手工按门禁输出挑文件，它的优势是一次性把所有受管文件都过一遍：门禁的 raw 比对虽然也会对漏移植的注释判红，但那是**事后**判红（`RAW_ADAPTATIONS` 之外任何注释不一致都算漂移），而脚本按映射表直接打全部补丁，省掉「先漏掉、等门禁报出来再回头补」这一步；它也不会因映射写错而把 `tool-interconnect` 的补丁打到 `interconnect` 上。
 
 需要单独打某一个文件时，手工管道仍然可用：
 
@@ -66,7 +67,7 @@ git -C ~/dsh-wt-ic-merge diff <旧 head> <新 head> -- <上游路径> \
 
 1. **`patch` 会留下 `.orig`**：成功也会留（尤其是首个文件）。提交前用 `git status` 检查，删掉 `*.orig`；否则它们会被 `git add -A` 带进 commit。`.rej` 同理。
 2. **补丁部分失败会留下不可编译的中间态**：同一文件里「改比较/改调用点」的 hunk 打上了、而「新增方法/改签名」的 hunk 被拒时，文件会引用一个尚不存在的参数或方法。处理顺序：`find . -name '*.rej'` → 读 reject 手工补 → **立刻 `pnpm run typecheck`**，不要等到最后才发现。
-3. **hunk 被拒常常是因为本仓注释比上游旧**：门禁不比较注释，所以注释可能停留在更早的措辞，一旦上游在同一区域改动，上下文就对不上。此时按上游原文**整段重写该处注释**（连同代码一起），让这个区域重新逐字一致，否则下一次改动会继续被拒。
+3. **hunk 被拒常常是因为本仓注释比上游旧**：注释停留在更早的措辞时，一旦上游在同一区域改动，补丁上下文就对不上（门禁的 raw 比对也会直接判红，见第一节第 2 条）。此时按上游原文**整段重写该处注释**（连同代码一起），让这个区域重新逐字一致，否则下一次改动会继续被拒。
 
 配方用 `patch` 而不是 `git apply`：`git apply` 没有模糊匹配，上下文任何一行不匹配就整段拒绝。**但不要指望 fuzz 能救**——实测把 hunk 上下文里的一行注释改掉后，`git apply` 直接 `patch does not apply`，`patch -p1` 在同一处也照样 `1 out of 1 hunks failed`。上下文只差得**远**（在上下文窗口之外）时两种工具都能正常打上。非 ASCII 不是问题：中文注释在两种工具下都按字节匹配，不会因编码额外失败。
 
