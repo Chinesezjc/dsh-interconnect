@@ -217,3 +217,24 @@ ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION
 2. hash 判据降级为**同一包同一版本跨机一致**（三台互相逐字相同），而不是与本仓比。版本与层名单改为读 profile 的 `package.json`（`dsh.profile.bundles`）与装入的那个包的 manifest。
 
 **回滚**：还原 profile 备份三件套 + 在 profile 目录 `pnpm add dsh-interconnect@<迁移前那版> --registry=https://registry.npmjs.org --config.minimumReleaseAge=0`（版本号在备份里读，别照抄本文）+ 把 checkout `git reset --hard <迁移前的 HEAD>`。独立包继续留在 npm 上正是为了这条路可用，所以**不要**撤下或 deprecate 它。
+
+### 执行步骤（按序；每台做完再下一台：MomoiAiri → CI-Server → Windows）
+
+宿主机名/端口/路径：**MomoiAiri** checkout `/root/dsh-web`、port **9001**、`systemctl restart dsh-web`、profile `~/.dsh/profiles/web`；**CI-Server** checkout `/home/ubuntu/deepseek-harness`、port **3080**、`sudo -n systemctl restart dsh-web`；**CI-Server-Windows** checkout `C:\dsh`、port **3080**、`Stop-ScheduledTask DSH-Web` + `Start-ScheduledTask DSH-Web`。
+
+1. **备份 profile 三件套**（`package.json`、`cordis.patch.yml`、`pnpm-lock.yaml`）到 `$profile/.backup-<迁移前版本>-<UTC>/`。**必做**：既有备份只到 `0.11.13–0.11.19`（MomoiAiri）/`0.11.13–0.11.18`（另两台），近几次升级没留；备份不含插件目录（回滚时从 npm 重装）。0.11.23 的那份已在 2026-09-15 备好并逐字节校验，若 profile 之后又被改过则重备。
+2. `git fetch origin`，**先确认 `origin/master` 已含目标包再 ff**：
+   `git ls-tree -r --name-only origin/master | grep -q packages/experimental/interconnect-profile/ || echo "MIRROR NOT SYNCED — 先别 ff"`，通过后 `git merge --ff-only origin/master`。
+   **注意取源不同**：MomoiAiri 直连私有仓；CI-Server / Windows 取**本机镜像**（`/data_local/ci/mirror/…`、`C:/ci/mirror/…`）—— 镜像滞后会造成「成功但不够」的 ff（拿到的 master 没有四包，症状要到第 4 步才报 resolve 失败）。
+3. `pnpm install --frozen-lockfile` → `pnpm run build`。**为什么必须 build**：bundle 行按包名加载，这些包的 `main`/`exports["."]` 指向 `lib/index.js`；`tsconfig.host.json` 已引用四个包，build 会产出它们。
+4. 写 profile 的 `package.json`（三台目标同一份）：`dsh.profile.bundles` 把 `dsh-interconnect` 换成 `@deepseek-ai/dsh-experimental-interconnect-profile`；`dependencies` 移除 `dsh-interconnect`（留 `{}`，**不加**新包——它从 dsh 安装解析）→ `pnpm install --config.minimumReleaseAge=0` → 用 `--dump-config` 验证组合出三行且 `interconnect` 行 `config` 带该机 `instanceId`/`peers`。**`dsh` 不在宿主 PATH**，正确形式：Linux `cd <checkout> && node --import <checkout>/node_modules/tsx/dist/esm/index.mjs apps/cli/src/bin.ts --profile web --dump-config`；Windows `cd /d C:\dsh && node --import tsx/esm apps/cli/src/bin.ts --profile web --dump-config`。**不要**用 `dsh plugin add`（该包不在 npm，会报 not in the npm registry；安全失败但白跑）。
+5. **`cordis.patch.yml` 一个字都不改**（行 id 相同，覆盖层照样命中）。
+6. 重启（命令见本节开头的三台表）。
+7. 回读：unit active；**进程确实加载了新代码** —— `p=$(systemctl show dsh-web -p MainPID --value)`，要求 `stat -c %Y /proc/$p` **大于**插件文件 mtime（只看「磁盘版本 + 能响应」不够：重启没生效时旧进程照样响应）；`GET /` 轮询到 401（重启后可能先 404）；`/interconnect/link` 无 token 401；本机五帧。Windows 用 `Get-NetTCPConnection -LocalPort 3080 -State Listen` 取权威 pid。
+8. 链路：本机到每个配置 peer 的**出站** ESTAB；再对下一跳隧道端口跑五帧（**六条有向腿**）。
+9. 版本回读：读 `dsh.profile.bundles` + **`<checkout>/packages/experimental/interconnect-profile/package.json` 的 version** —— **路径在 dsh 安装里，不在 profile 的 `node_modules`**（第 4 步没把新包写进 profile 依赖）；三个插件包同理读 `<checkout>/packages/experimental/*/package.json`。该 bundle 包**没有 `dsh.plugin.json`**（靠 `dsh.bundle.patch`）。
+10. 回滚：见上一段。
+
+**顺序警告**：第 3 步做完到第 4/5 步改完 profile 之间**绝对不要重启** —— 此时磁盘上的 profile 仍指着独立包，而 checkout 已是合入后的 master。正确顺序是 2 → 3 → 4 → 5 → 6。
+
+**合入后的收尾（先做完再动三台）**：① 撤掉会话记忆里属于本工作流的 watch（`ic-branch-head`、`ic-3243-ready`、`ic-3243-merged`）—— 不撤则分支每次 push 都会唤醒会话；② 停止同步（不再跟 head、不再发版）；③ **独立仓与 npm 包保持原样发布**：不 deprecate、不归档、不撤版本（既是上游 #3244 的验收条件，也是第 10 步回滚的前提）。
