@@ -325,6 +325,21 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
   }
 }
 
+/**
+ * Resolve once `instanceId`'s outbound link has completed its handshake. A
+ * `ping` answers only over a writable link, and frames on one socket arrive in
+ * order, so the peer has already processed this instance's `hello` when the
+ * answer returns — which is what a following `send` needs to be attributed to a
+ * peer instead of `unknown-peer`. Waiting on that instead of a fixed delay keeps
+ * the link tests independent of how loaded the runner is.
+ * @param service - the mounted interconnect service owning the route.
+ * @param instanceId - the configured peer whose link must be ready.
+ * @param timeoutMs - the readiness budget before the wait gives up.
+ */
+async function awaitLink(service: InterconnectService, instanceId: string, timeoutMs = 5000): Promise<void> {
+  await waitUntil(async () => (await service.ping(instanceId))?.pong === true, timeoutMs)
+}
+
 describe('interconnect host half', () => {
   it('registers the /interconnect/link upgrade route and removes it with the fiber', async () => {
     const { upgrades, dispose } = await mounted('secret')
@@ -357,13 +372,21 @@ describe('interconnect host half', () => {
 })
 
 describe('interconnect over real WS links', () => {
+  it('refuses to report a link ready while its dial has no answer', async () => {
+    // Port 1 has no listener, so this route exists but never becomes writable.
+    const { ctx, dispose } = await mounted('secret', new Set([]), {}, 'followup', true, 'inst-wait')
+    linkRoute(ctx.interconnect, 'peer-dead', 'http://127.0.0.1:1')
+    await expect(awaitLink(ctx.interconnect, 'peer-dead', 300)).rejects.toThrow('waitUntil timed out after 300ms')
+    await dispose()
+  })
+
   it('links a configured peer automatically and delivers a send over the link', async () => {
     const receiver = await mounted('secret', new Set(['R-sess']))
     const r = await serveUpgrade(receiver.upgrades)
     const rUrl = `http://127.0.0.1:${String(r.port)}`
     const sender = await mounted('secret', new Set([]), { 'peer-b': rUrl })
     try {
-      await wait(200) // let the auto-link dial + hello land
+      await awaitLink(sender.ctx.interconnect, 'peer-b')
       const result = await sender.ctx.interconnect.send({
         instanceId: 'peer-b',
         sessionId: 'R-sess',
@@ -396,7 +419,7 @@ describe('interconnect over real WS links', () => {
     const rUrl = `http://127.0.0.1:${String(r.port)}`
     const sender = await mounted('secret', new Set([]), { 'peer-b': rUrl })
     try {
-      await wait(200)
+      await awaitLink(sender.ctx.interconnect, 'peer-b')
       const ping = await sender.ctx.interconnect.ping('peer-b')
       expect(ping?.pong).toBe(true)
       expect(ping?.instance).toBe('test-instance')
@@ -427,7 +450,8 @@ describe('interconnect over real WS links', () => {
     const bUrl = `http://127.0.0.1:${String(bServ.port)}`
     linkRoute(a.ctx.interconnect, 'inst-b', bUrl) // A links back to B
     try {
-      await wait(250) // both links dial + hello
+      await awaitLink(b.ctx.interconnect, 'inst-a')
+      await awaitLink(a.ctx.interconnect, 'inst-b')
       const sent = await b.ctx.interconnect.send({
         instanceId: 'inst-a',
         sessionId: 'A-sess',
@@ -595,7 +619,7 @@ describe('interconnect outbound-only mode without a webserver', () => {
       webServer: false,
     })
     try {
-      await wait(200)
+      await awaitLink(sender.ctx.interconnect, 'peer-o')
       const result = await sender.ctx.interconnect.send({
         instanceId: 'peer-o',
         sessionId: SESSION_ID,
@@ -647,7 +671,7 @@ describe('interconnect lifecycle event fan-out', () => {
     const seen: EventNotification[] = []
     receiver.ctx.on('interconnect/event', (notification: EventNotification) => { seen.push(notification) })
     try {
-      await wait(200)
+      await awaitLink(sender.ctx.interconnect, 'peer-b')
       sender.ctx.emit('agent/status', { agent: { session: { id: 's1' } }, status: 'idle' } as never)
       sender.ctx.emit('agent/created', agentPayload('s2'))
       sender.ctx.emit('agent/disposed', { agent: { session: { id: 's3' } } } as never)
@@ -987,7 +1011,8 @@ describe('interconnect delivery modes and wake', () => {
     const rUrl = `http://127.0.0.1:${String(rServ.port)}`
     linkRoute(sender.ctx.interconnect, 'inst-recv', rUrl)
     try {
-      await wait(250)
+      await awaitLink(sender.ctx.interconnect, 'inst-recv')
+      await awaitLink(receiver.ctx.interconnect, 'inst-send')
       const result = await sender.ctx.interconnect.send({
         instanceId: 'inst-recv',
         sessionId: 'R-sess',
@@ -1024,7 +1049,7 @@ describe('interconnect delivery modes and wake', () => {
     const rUrl = `http://127.0.0.1:${String(rServ.port)}`
     linkRoute(sender.ctx.interconnect, 'inst-big-recv', rUrl)
     try {
-      await wait(250)
+      await awaitLink(sender.ctx.interconnect, 'inst-big-recv')
       // The accepted and refused texts are adjacent, so the pair pins the cap
       // byte-exactly instead of leaving slack. With an empty text and the same
       // `m<counter>-<uuid>` request id length, this placeholder carries only
