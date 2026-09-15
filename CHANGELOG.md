@@ -2,6 +2,23 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.17（2026-09-15）
+
+跟随 #3243 分支新 head（`10625dbaf770`）：给 `instanceId` 加上与 `reqId` 对齐的长度上限，据此删掉列表应答里「信封都放不下」的分支；把事件订阅交给 Cordis 的 fiber 生命周期；并让拨号链路按对端**announce 的 id** 也能归属对端。
+
+### 变更
+
+- **`instanceId` 上限 256 字符**（`MAX_INSTANCE_ID_CHARS`，schema 加 `.max()`）：每帧本实例写出的内容都带 instanceId（`hello`、应答、结果），没有上限时一个超长 id 会在第一次写入时撞上链路帧上限，而不是在加载配置时就失败。错误暴露点前移到加载期。
+- **删掉 `list` 应答的负预算分支**：两个会进入信封的 id 现在都有界（`reqId` 256、`instanceId` 256），信封必然放得下，于是 `listRowsBudgetBytes` 的返回值恒定为正，`@returns` 与调用点都不再需要「负值即无法作答」的路径（该分支与它的 warn 一并移除）。
+- **事件订阅改用 Cordis 的 fiber 作用域**：删掉 `private readonly subscriptions: (() => void)[]` 与配套的 `ctx.effect(...)` 手工清理，六处 `ctx.on(...)` 直接调用。监听器随服务 fiber 自动注销，少一层需要自己维护的簿记——此前手工数组与服务生命周期是两套并行的清理路径。
+- **拨号链路的对端归属按 announce 的 id 补齐**：`covered` 集合除配置键（`Config.peers` 的 key）外，现在还加入该链路对端在 `hello` 里 announce 的 id。部署完全可以把一个 peer 配在与其自称不同的键下（本仓三台恰好键与 announce 值相同，但配置并不要求如此），此时对端的入站 socket 通过两个名字中的任一个都可归属，事件扇出不会误发第二份。
+- **上游新增/改写 4 条用例**（`tests/interconnect.host.spec.ts`，1:1 移植）：`delivery`/`allowResume`/`peers` 省略时取默认值；按对端 **announce 的 id**（而非仅配置键）归属拨号对端；超长 `instanceId` 被拒绝加载；恰好在上限的 `instanceId` 被接受。
+
+### 验证
+
+- `pnpm run check`（typecheck + 167/167 tests + build）全绿（用例数 166 → 167；上游本次新加 4 条并整合了旧用例）。
+- 对齐门禁：`no behavioural drift against 10625dbaf770 across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`。`assets/dsh-interconnect.md` 未变（仍逐字节一致），skill 正文无需改动。
+
 ## 0.11.16（2026-09-15）
 
 跟随 #3243 分支新 head（`6992f71eaeef`）：本地拒绝超出链路帧上限的 `msg` 帧，并把这个失败原因变成对模型可见、可据以行动的措辞。

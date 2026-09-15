@@ -117,6 +117,13 @@ const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
 /** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
 /**
+ * Longest `instanceId` a deployment may configure. Every frame this instance
+ * writes carries it (the `hello` announcement, answers, and results), so an
+ * unbounded id would fail the first write against the link cap instead of
+ * failing the load.
+ */
+const MAX_INSTANCE_ID_CHARS = 256
+/**
  * Longest request id one inbound frame may carry. Every answer repeats the
  * peer's `reqId`, so an unbounded id would decide the size of the frame this
  * instance writes back; the ids this plugin generates are about 40 characters.
@@ -328,7 +335,7 @@ const linkFrameSchema = z.union([
 export class InterconnectService extends Service {
   static inject = ['agents', 'credentials']
   static Config: z<Config> = z.object({
-    instanceId: z.string().default('dsh'),
+    instanceId: z.string().max(MAX_INSTANCE_ID_CHARS).default('dsh'),
     requestTimeoutMs: z.natural().max(60000).default(10000),
     peers: z.dict(z.string()).default({}),
     delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]).default('followup'),
@@ -339,7 +346,6 @@ export class InterconnectService extends Service {
   private readonly requestTimeoutMs: number
   private readonly delivery: DeliveryMode
   private readonly allowResume: boolean
-  private readonly subscriptions: (() => void)[] = []
   private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_LINK_FRAME_BYTES })
   private readonly sockets = new Set<WebSocket>()
   /** Outbound peer links keyed by the peer's `instanceId`. */
@@ -436,16 +442,16 @@ export class InterconnectService extends Service {
     // Protocol constants, not deployment tunables: the heartbeat cadence is
     // fixed by the link-layer liveness contract and the backoff schedule by the
     // reconnect policy, so both stay hardcoded like the frame vocabulary.
-    this.subscriptions.push(ctx.on('agent/status', ({ agent, status }) => {
+    ctx.on('agent/status', ({ agent, status }) => {
       this.fanout({ kind: 'agent/status', sessionId: String(agent.session.id), status })
-    }))
-    this.subscriptions.push(ctx.on('agent/created', ({ agent }) => {
+    })
+    ctx.on('agent/created', ({ agent }) => {
       this.fanout({ kind: 'agent/created', sessionId: String(agent.session.id) })
-    }))
-    this.subscriptions.push(ctx.on('agent/disposed', ({ agent }) => {
+    })
+    ctx.on('agent/disposed', ({ agent }) => {
       this.fanout({ kind: 'agent/disposed', sessionId: String(agent.session.id) })
-    }))
-    this.subscriptions.push(ctx.on('session/created', (session: Session) => {
+    })
+    ctx.on('session/created', (session: Session) => {
       const parentSessionId = session.header.parentSession === undefined
         ? undefined
         : String(session.header.parentSession)
@@ -454,12 +460,12 @@ export class InterconnectService extends Service {
         sessionId: String(session.id),
         ...(parentSessionId === undefined ? {} : { parentSessionId }),
       })
-    }))
-    this.subscriptions.push(ctx.on('session/disposed', (session: Session) => {
+    })
+    ctx.on('session/disposed', (session: Session) => {
       this.senders.delete(String(session.id))
       this.fanout({ kind: 'session/disposed', sessionId: String(session.id) })
-    }))
-    this.subscriptions.push(ctx.on('subagent/end', (info: SubagentRunEndInfo) => {
+    })
+    ctx.on('subagent/end', (info: SubagentRunEndInfo) => {
       // Only in-process children are this instance's own work; remote provider
       // runs settle through a different, non-local path.
       if (!info.local) return
@@ -469,12 +475,7 @@ export class InterconnectService extends Service {
         childSessionId: String(info.id),
         stopReason: info.stopReason,
       })
-    }))
-
-    // Clean up the event listeners with the service fiber.
-    ctx.effect(() => () => {
-      for (const dispose of this.subscriptions.splice(0)) dispose()
-    }, 'interconnect: event subscriptions')
+    })
 
     // Terminate every live socket, outbound dial loop, and the no-server
     // acceptor when the service fiber unwinds.
@@ -706,10 +707,12 @@ export class InterconnectService extends Service {
    * dialed link plus the peer's inbound one), so one event must leave over one
    * of them. Which one is decided by local ownership, not by the peer: a dialed
    * socket is a configured peer's link and always sends. An inbound socket is
-   * skipped only when a dialed link to the id that socket itself announced is
-   * open, so an announcement can suppress nothing but a duplicate the
-   * controlled link already carries — an impostor cannot drop an event for a
-   * peer, and without a dialed link every inbound socket receives it.
+   * skipped only when an open dialed link covers the id that socket itself
+   * announced — either because `Config.peers` lists that peer under the id, or
+   * because the peer announced the id over that dialed link — so an
+   * announcement can suppress nothing but a duplicate the controlled link
+   * already carries. An impostor cannot drop an event for a peer, and without a
+   * dialed link every inbound socket receives it.
    *
    * That holds once a peer's announcement has been seen. Between this
    * instance's dialed link opening and the peer's `hello` arriving on its
@@ -728,7 +731,14 @@ export class InterconnectService extends Service {
         continue
       }
       const dialedPeer = this.dialedPeerOf.get(socket)
-      if (dialedPeer !== undefined) covered.add(dialedPeer)
+      if (dialedPeer === undefined) continue
+      covered.add(dialedPeer)
+      // The configured key is a local name, and a deployment may list a peer
+      // under one that differs from the id the peer announces. The id the peer
+      // announced over this link is the other name the same peer is known by,
+      // so an inbound socket of that peer is attributable through either.
+      const announced = this.peerOf.get(socket)
+      if (announced !== undefined) covered.add(announced)
     }
     for (const socket of this.sockets) {
       if (this.dialedPeerOf.get(socket) === undefined) {
@@ -766,16 +776,7 @@ export class InterconnectService extends Service {
     if (query.kind === 'ping') {
       result = { pong: true, instance: this.instanceId }
     } else if (query.kind === 'list') {
-      const rowBudget = this.listRowsBudgetBytes(reqId)
-      if (rowBudget < 0) {
-        // The answer's own envelope already exceeds the link cap, so no listing
-        // can be sent: writing one would make the peer's ws drop the link, and
-        // the caller would read the truncation as a transport failure. Nothing
-        // is written, so the request times out and reports exactly that.
-        this.ctx.logger.warn('interconnect: list answer cannot fit the link frame cap; not answering')
-        return
-      }
-      result = this.listSessions(rowBudget)
+      result = this.listSessions(this.listRowsBudgetBytes(reqId))
     } else {
       const payload: EventPayload = {
         sender: this.peerOf.get(socket) ?? 'unknown-peer',
@@ -816,10 +817,11 @@ export class InterconnectService extends Service {
    * Bytes one `list` answer may spend on its `sessions` rows: the frame cap
    * minus the serialized envelope that answer will carry. The envelope holds
    * the peer-supplied `reqId` and this instance's own id, so it is measured per
-   * answer instead of reserved with a fixed constant.
+   * answer instead of reserved with a fixed constant. Both ids are bounded
+   * ({@link MAX_REQUEST_ID_CHARS} and {@link MAX_INSTANCE_ID_CHARS} characters),
+   * so the envelope always fits and the budget is always positive.
    * @param reqId - the request id the answer has to echo.
-   * @returns the byte budget for the rows, negative when even an empty answer
-   * exceeds the cap and so cannot be sent at all.
+   * @returns the byte budget for the rows.
    */
   private listRowsBudgetBytes(reqId: string): number {
     const envelope: LinkFrame = {

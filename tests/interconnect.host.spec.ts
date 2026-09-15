@@ -190,6 +190,22 @@ function linkRoute(service: InterconnectService, instanceId: string, origin: str
   ;(service as unknown as { link(id: string, origin: string): void }).link(instanceId, origin)
 }
 
+/** One dialed route's private state, so a test can observe a closed link. */
+interface RouteState {
+  close(): void
+  dialed?: unknown
+  reconnectTimer?: unknown
+  retry: number
+}
+
+/** Read one dialed route's private state through the seam the service owns. */
+function routeState(service: InterconnectService, instanceId: string): RouteState {
+  const states = (service as unknown as { linkStates: Map<string, RouteState> }).linkStates
+  const state = states.get(instanceId)
+  if (state === undefined) throw new Error(`no route for ${instanceId}`)
+  return state
+}
+
 /** Close one dialed route through the private route table, simulating fiber teardown. */
 function closeRoute(service: InterconnectService, instanceId: string): void {
   const states = (service as unknown as { linkStates: Map<string, { close(): void }> }).linkStates
@@ -595,9 +611,28 @@ describe('interconnect outbound-only mode without a webserver', () => {
 })
 
 describe('interconnect config defaults and route lifecycle', () => {
-  it('mounts with omitted delivery/allowResume/peers falling back to their defaults', async () => {
-    const { dispose } = await mounted('secret', new Set([]), undefined, undefined, undefined, 'defaults-instance')
-    await dispose()
+  it('applies the delivery, allowResume, and peers defaults when they are omitted', async () => {
+    const receiver = await mounted('secret', new Set(['R-sess']), undefined, undefined, undefined, 'defaults-instance')
+    // `delivery` defaults to followup ...
+    const delivered = await deliverInbound(receiver.service, { kind: 'send', sessionId: 'R-sess', text: 'hi' })
+    expect(delivered).toContainEqual({
+      type: 'msg-result',
+      reqId: 'w-1',
+      result: { delivered: true, instance: 'defaults-instance', delivery: 'followup' },
+    })
+    expect(receiver.methods.get('R-sess')).toEqual(['followup'])
+    // ... `allowResume` defaults to true, so a resume request reaches the wake
+    // path (which reports not-live without a Host lookup) rather than being
+    // refused ...
+    const woken = await deliverInbound(receiver.service, { kind: 'send', sessionId: 'ghost', text: 'hi', resume: true })
+    expect(woken).toContainEqual({
+      type: 'msg-result',
+      reqId: 'w-1',
+      result: { delivered: false, instance: 'defaults-instance', reason: 'session-not-live' },
+    })
+    // ... and `peers` defaults to an empty mesh.
+    expect(await receiver.ctx.interconnect.ping('any-peer')).toBeUndefined()
+    await receiver.dispose()
   })
 
 })
@@ -638,6 +673,24 @@ describe('interconnect lifecycle event fan-out', () => {
     }
   })
 
+  it('attributes the dialed peer by the id it announced, not only by its configured key', async () => {
+    const receiver = await mounted('secret', new Set([]))
+    const events = (socket: { sent: string[] }): string[] => socket.sent.filter(line => line.includes('"type":"event"'))
+    const dialed = fakeSocket()
+    const inbound = fakeSocket()
+    // The peer is listed under a local key (`peer-b`) but announces its own id
+    // (`inst-b`) on both links, so the inbound duplicate is attributable through
+    // that announcement rather than through the configured key.
+    attachDialedSocket(receiver.service, dialed.socket, 'peer-b')
+    attachSocket(receiver.service, inbound.socket)
+    dialed.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'inst-b' }))
+    inbound.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'inst-b' }))
+    receiver.ctx.emit('agent/created', agentPayload('s1'))
+    expect(events(dialed.socket)).toHaveLength(1)
+    expect(events(inbound.socket)).toHaveLength(0)
+    await receiver.dispose()
+  })
+
   it('sends each lifecycle event once per peer, preferring the link this instance dials', async () => {
     const receiver = await mounted('secret', new Set([]))
     const sockets = (receiver.service as unknown as { sockets: Set<WebSocket> }).sockets
@@ -655,8 +708,13 @@ describe('interconnect lifecycle event fan-out', () => {
       socket.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'peer-b' }))
     }
     other.handlers.get('message')!(JSON.stringify({ type: 'hello', sender: 'peer-z' }))
+    // A dialed link whose peer has not announced yet is not attributable to
+    // anything, so it still carries the event.
+    const silentDial = fakeSocket()
+    attachDialedSocket(receiver.service, silentDial.socket, 'peer-q')
     receiver.ctx.emit('agent/created', agentPayload('s1'))
     expect(events(dialed.socket)).toHaveLength(1)
+    expect(events(silentDial.socket)).toHaveLength(1)
     // The inbound duplicate of the dialed peer is skipped, so peer-b still
     // receives the event exactly once, over the link this instance owns.
     expect(events(inbound.socket)).toHaveLength(0)
@@ -1438,8 +1496,8 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     const liveIds = Array.from({ length: 100 }, (_unused, index) => `session-${String(index)}`)
     // Both the request id the answer echoes and this instance's own id are part
     // of the frame, so the row budget has to be measured against them rather
-    // than reserved with a constant.
-    const instanceId = `inst-${'i'.repeat(5000)}`
+    // than reserved with a constant. Both are at their 256-character bound.
+    const instanceId = `inst-${'i'.repeat(251)}`
     const receiver = await mounted('secret', new Set(liveIds), {}, 'followup', true, instanceId, {
       provides: {
         sessionProjections: {
@@ -1492,23 +1550,26 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     }
   })
 
-  it('does not answer a list request whose envelope alone exceeds the frame cap', async () => {
-    // An instance id larger than the link cap makes even an empty answer
-    // unsendable; writing one would make the peer's ws drop the link.
-    const receiver = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'i'.repeat(1024 * 1024 + 1))
-    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
-    try {
-      const { socket, handlers } = fakeSocket()
-      attachSocket(receiver.service, socket)
-      const sentBefore = socket.sent.length
-      handlers.get('message')!(JSON.stringify({ type: 'query', reqId: 'list-1', query: { kind: 'list' } }))
-      await wait(30)
-      expect(socket.sent.slice(sentBefore)).toHaveLength(0)
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('cannot fit the link frame cap'))
-    } finally {
-      warn.mockRestore()
-      await receiver.dispose()
-    }
+  it('refuses to load an instance id longer than the frame it would travel in', async () => {
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer([]) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set()))
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    // An unbounded instance id would fail the first frame this instance writes
+    // (its hello) against the link cap, so the load refuses it instead.
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'i'.repeat(257),
+      requestTimeoutMs: 10000,
+      peers: {},
+    })
+    await expect(fiber.await()).rejects.toThrow()
+  })
+
+  it('accepts an instance id at the bound', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'i'.repeat(256))
+    const answers = await queryList(receiver.service)
+    expect(answers[0]?.result).toMatchObject({ instance: 'i'.repeat(256) })
+    await receiver.dispose()
   })
 
   it('counts a multibyte title by its serialized bytes', async () => {
@@ -1926,23 +1987,15 @@ describe('interconnect outbound timeouts', () => {
 })
 
 describe('interconnect dial and teardown edge paths', () => {
-  it('falls back to defaults when config keys are omitted', async () => {
-    const ctx = new Context()
-    const upgrades: WebUpgradeRoute[] = []
-    ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
-    ctx.provide('agents', fakeAgents(new Map(), new Set()))
-    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
-    const fiber = ctx.plugin(InterconnectService, { instanceId: 'defaults-instance' } as never)
-    await fiber.await()
-    await fiber.dispose()
-  })
-
   it('dials an https origin with a wss protocol', async () => {
     const sender = await mounted('secret', new Set([]), { 'https-peer': 'https://127.0.0.1:1' })
     try {
       // The wss dial to a closed port fails and schedules reconnection.
       expect(await sender.ctx.interconnect.ping('https-peer')).toBeUndefined()
       await wait(1100)
+      // A dial really happened: the failed socket's close handler scheduled the
+      // retry that a link which never dialed would not have.
+      expect(routeState(sender.service, 'https-peer').retry).toBeGreaterThan(0)
     } finally {
       await sender.dispose()
     }
@@ -1965,8 +2018,14 @@ describe('interconnect dial and teardown edge paths', () => {
       peers: { 'peer-b': 'http://127.0.0.1:1' },
     })
     await fiber.await()
-    closeRoute(ctx.interconnect, 'peer-b')
+    const state = routeState(ctx.interconnect, 'peer-b')
+    state.close()
     await wait(400) // the resolving token lands after close; the dial stops
+    // The closed link must not dial (no socket record), nor start a reconnect
+    // loop nobody owns.
+    expect(state.dialed).toBeUndefined()
+    expect(state.reconnectTimer).toBeUndefined()
+    expect(state.retry).toBe(0)
     await fiber.dispose()
   })
 
@@ -1987,8 +2046,12 @@ describe('interconnect dial and teardown edge paths', () => {
       peers: { 'peer-b': 'http://127.0.0.1:1' },
     })
     await fiber.await()
-    closeRoute(ctx.interconnect, 'peer-b')
+    const state = routeState(ctx.interconnect, 'peer-b')
+    state.close()
     await wait(400) // the rejecting token lands after close; no reconnect is scheduled
+    expect(state.dialed).toBeUndefined()
+    expect(state.reconnectTimer).toBeUndefined()
+    expect(state.retry).toBe(0)
     await fiber.dispose()
   })
 
