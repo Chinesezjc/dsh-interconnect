@@ -33,7 +33,17 @@ node scripts/check-upstream-alignment.mjs --ref <上游 head sha>
 - `node:crypto` 的导入改写；
 - 资源路径 `../assets/` → `../../assets/`。
 
-上游的改动区域通常不含适配点，于是可以直接打补丁：
+上游的改动区域通常不含适配点，于是机械移植就是「按路径映射逐文件 `git diff | sed | patch`」：
+
+```sh
+node scripts/port-upstream-change.mjs --from <旧 head> --to <新 head>
+```
+
+该脚本按**显式映射表**处理四个源文件、三个 spec 与 skill 正文（正文**字节复制**、绝不 patch），自动删掉 `patch` 的 `.orig` 备份、列出所有 `.rej`、列出它不管的上游改动（docs/i18n 与本仓无关，`package.json` 的 `peerDependenciesMeta`/peer 集合要手工改），最后跑一次对齐门禁；**有任何 hunk 被拒就以非零退出**。
+
+相比手工按门禁输出挑文件，它有两个优势：不会漏掉**只改注释**的文件（门禁忽略注释，手工挑文件时会漏，留下将来 hunk 上下文不匹配的隐患），也不会因映射写错而把 `tool-interconnect` 的补丁打到 `interconnect` 上。
+
+需要单独打某一个文件时，手工管道仍然可用：
 
 ```sh
 git -C ~/dsh-wt-ic-merge diff <旧 head> <新 head> -- <上游路径> \

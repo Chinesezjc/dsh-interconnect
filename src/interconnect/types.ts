@@ -287,10 +287,13 @@ export interface Config {
    *
    * Fan-out of local lifecycle events goes to every live peer, including an
    * inbound peer that is not in this map; an event travels over the link this
-   * instance dials, and an inbound socket is skipped only when a dialed link to
-   * the id that socket announced is already open. This map is the whole route
-   * surface: only the constructor reads it, so a peer link is added, removed,
-   * or re-pointed by restarting with different values.
+   * instance dials, and an inbound socket is skipped only when this map has an
+   * open dialed link for the id that socket announced. A peer listed under a
+   * key other than the id it announces is therefore not recognised as the same
+   * peer and receives each event twice; the service warns about that once per
+   * link. This map is the whole route surface: only the constructor reads it,
+   * so a peer link is added, removed, or re-pointed by restarting with
+   * different values.
    */
   readonly peers?: Record<string, string>
   /**
