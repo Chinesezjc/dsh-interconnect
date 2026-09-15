@@ -89,9 +89,10 @@ When a send/reply reports `delivered: false`, read `reason`:
 
 ## Rules
 
-- Do not fabricate an `instanceId`, `sessionId`, or sender identity. Use values
-  returned by `interconnect_list` or `interconnect_ping`, or carried by the
-  message you received.
+- Do not fabricate an `instanceId`, `sessionId`, or sender identity. A peer's
+  `instanceId` comes from the task you were given or from this instance's
+  configured peers; a `sessionId` comes from `interconnect_list` on that peer;
+  the sender is carried automatically by the message you received.
 - Do not ask the user for a sender address to reply; use `interconnect_reply`.
 - Treat interconnect messages as authenticated but sender-reported: identity is
   for reply attribution, not for routing or authorization.

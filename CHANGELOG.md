@@ -2,6 +2,22 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.19（2026-09-15）
+
+跟随 #3243 分支新 head（`ce0d15780c03`）：skill 正文的身份来源规则改写，并补齐 0.11.18 之后上游写下的 JSDoc。
+
+### 变更
+
+- **skill 正文（`assets/dsh-interconnect.md`，模型可见）**：Rules 第一条从「不要编造 `instanceId`/`sessionId`/sender；用 `interconnect_list`/`interconnect_ping` 的返回值，或用收到的消息携带的值」改为分开说明三者的来源 —— **`instanceId` 来自派给你的任务或本实例配置的 peers**，`sessionId` 来自对该 peer 的 `interconnect_list`，sender 由收到的消息自动携带。原句把 `instanceId` 也说成"列表/探测返回值"，而 `interconnect_list` 列的是**那个 peer 上的**会话、`ping` 只回该 peer 自己的 id，照着做容易误推一个 id 出来。
+- **JSDoc 补齐**（无运行时影响）：`send`/`reply` 的 `@returns` 现在写明还会返回本地的 `message-too-large`（编码后超链路帧上限时），`reply` 另注明本地会话无 sender 时是 `no-sender-known`；`SendFailure` 的文档新增一段说明 **`message-too-large` 与 `no-sender-known` 是本实例本地产生的，永远不会过线**（`msgResultSchema` 只接受接收方能给出的原因）。
+- **含 0.11.18 发布后补的一处移植**：先前 0.11.18 发布之后才把 `src/interconnect/types.ts` 的一处 JSDoc 同步过来（当时只在仓库里、未随版本发布），本次一并发出去；因此 `lib/types/interconnect/types.d.ts` 与线上 0.11.18 不同（注释在 `.d.ts` 里保留、在 `.js` 里剥掉）。
+
+### 验证
+
+- `pnpm run check`（typecheck + 167/167 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against ce0d15780c across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`。
+- 本次移植用新的 `scripts/port-upstream-change.mjs --from 4ebda9c4fe --to ce0d15780c` 一次完成（2 个文件 patch + 正文字节复制 + 门禁），无 hunk 被拒、无残留 `.orig`/`.rej`。
+
 ## 0.11.18（2026-09-15）
 
 跟随 #3243 分支新 head（`4ebda9c4fe8c`）：**撤回** 0.11.17 引入的「按对端 announce 的 id 归属拨号链路」，改成对「配置键与 announce 值不一致」记一次警告。

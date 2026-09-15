@@ -514,7 +514,8 @@ export class InterconnectService extends Service {
   /**
    * Deliver one text message to a live session on a peer instance.
    * @param request - the peer instance id, target session, text, and optional delivery/resume overrides.
-   * @returns the peer's answer, or an unreachable result when no link answers.
+   * @returns the peer's answer, an unreachable result when no link answers, or a local
+   * `message-too-large` result when the encoded frame would exceed the link cap.
    */
   async send(request: SendRequest): Promise<SendResult> {
     const payload: SendPayload = {
@@ -538,7 +539,9 @@ export class InterconnectService extends Service {
    * outbound target is the `sender` that session recorded, addressed through
    * this instance's own link to the sender's instance.
    * @param request - the LOCAL replying session id, the reply text, and optional delivery/resume overrides.
-   * @returns the recalled sender's answer, or an unreachable result when no link answers.
+   * @returns the recalled sender's answer, an unreachable result when no link answers, or a
+   * local `message-too-large` result when the encoded frame would exceed the link cap; a
+   * local session that recorded no sender answers `no-sender-known` instead.
    */
   async reply(request: ReplyRequest): Promise<SendResult> {
     const sender = this.senders.get(request.sessionId)

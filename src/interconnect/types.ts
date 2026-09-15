@@ -96,6 +96,10 @@ export interface SendPayload {
  *   through this service or the incoming message carried no `sender` identity
  *   (an older peer omitted it). A caller with no executing session reports it
  *   too: there is no local session whose sender could be recalled.
+ *
+ * `message-too-large` and `no-sender-known` are produced locally and never cross
+ * the wire: `msgResultSchema` admits only the reasons a receiver can answer with,
+ * so a caller sees them only from this instance's own service.
  */
 export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent' | 'message-too-large' | 'no-sender-known'
 
