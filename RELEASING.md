@@ -62,14 +62,23 @@ git -C ~/dsh-wt-ic-merge diff <旧 head> <新 head> -- <上游路径> \
 每个实例的 profile 以 bundle 形式安装本包。升级即在 profile 里换版本、重启服务、回读验证：
 
 ```sh
-cd <该机的 DSH checkout>
-node --import <checkout>/node_modules/tsx/dist/esm/index.mjs apps/cli/src/bin.ts \
-  plugin --profile web add dsh-interconnect@<版本> --config.minimumReleaseAge=0
+# 直接在 profile 目录里换版本（见坑四：`dsh plugin add` 不会把 --registry 转给 pnpm）
+cd $DSH_HOME/profiles/web
+pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --config.minimumReleaseAge=0
 # 然后重启该实例的 DSH（systemd 或计划任务），并回读：
 #   已装 package.json 与 dsh.plugin.json 的版本
 #   `GET /interconnect/link` 的 WS 握手（无 token 返回 401 即路由已挂载）
 #   用 scripts/probe-deployed-link.cjs 打 hello/ping/list/event/msg 五种帧
 ```
+
+`dsh plugin --profile web add` 仍可用（它会顺带按安装态对账 `dsh.profile.bundles`），但只换版本时直接 `pnpm add` 更可靠，且不依赖 checkout 可运行。
+
+### 坑四：镜像滞后与重启的两处现实约束
+
+- **`dsh plugin ... add` 不转发 `--registry`**：实测把 `--registry=https://registry.npmjs.org` 写在 `dsh plugin` 后面时 pnpm 仍查 `mirrors.tencentyun.com`，报「The latest release of dsh-interconnect is <上一个版本>」（发布后几分钟内镜像还没同步）。**可靠做法**是在 profile 目录直接 `pnpm add`，`--registry` 才会生效。
+- **`curl /` 在重启后可能先返回 404**：应用在组合插件树期间 Web 服务会先应答 404，几秒后才回到 401。判活要**轮询到 401**（或非 000/404）再下结论，别把启动窗口里的 404 当成挂载失败。
+- **重启命令**：MomoiAiri 上 `systemctl restart dsh-web` 直接可用；CI-Server 上同一条命令会报 `Interactive authentication required`（polkit），改用 `sudo -n systemctl restart dsh-web`。Windows 用 `Stop-ScheduledTask`/`Start-ScheduledTask DSH-Web`。
+- **Windows 上跑探测脚本**：`ssh <host> "powershell -EncodedCommand <b64>"` 在脚本里**内嵌文件内容**时会超命令行长度（报「命令行太长」）；先用 `scp` 把 `scripts/probe-deployed-link.cjs` 传到 `C:/dsh/`，再用短的 EncodedCommand 设好 `IC_TOKEN`/`IC_PORT`/`IC_WS` 后 `node` 它。该机 sshd 还会偶发地在命令执行前关连接，重试即可。
 
 `scripts/probe-deployed-link.cjs` 的用法：`IC_TOKEN` 必填（从该机 `$DSH_HOME/.credentials.yaml` 的 `DSH_INTERCONNECT_TOKEN` 取；它在 `refs:` 下**有两格缩进**，行首锚定的 sed 会取到空串）、`IC_PORT` 默认 3080。`IC_WS` 现在**可选**：不设时脚本解析本仓的 `ws` devDependency（在本仓 checkout 里直接可跑）；设了则用该路径（例如在某台宿主上跑时指向该机的 `ws` 包）。**不要打印 token 本身**。
 
