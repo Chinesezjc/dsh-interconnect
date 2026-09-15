@@ -1453,7 +1453,7 @@ function timingSafeEqual(a: string, b: string): boolean {
  *   non-WebSocket protocol.
  */
 export function linkUrl(origin: string): URL {
-  const url = new URL('/interconnect/link', origin)
+  const url = new URL(LINK_CHANNEL, origin)
   if (url.protocol === 'http:') url.protocol = 'ws:'
   else if (url.protocol === 'https:') url.protocol = 'wss:'
   if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {

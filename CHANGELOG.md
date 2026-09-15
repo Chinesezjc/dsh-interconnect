@@ -2,6 +2,22 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.23（2026-09-15）
+
+跟随 #3243 分支新 head（`f749a8c252`）：`linkUrl` 改用 `LINK_CHANNEL` 常量，不再重复字面量。
+
+### 变更
+
+- **`linkUrl` 用 `LINK_CHANNEL` 建拨号 URL**：原先写死 `new URL('/interconnect/link', origin)`，而 WebSocket 升级路由那一侧用的是常量 `LINK_CHANNEL = '/interconnect/link'`（`src/index.ts:122`）。现在两侧共用同一个常量——两处描述同一条路径，分开写就有漂移风险（改一处忘另一处会让拨号打到一个不存在的路由）。
+- **行为不变**：常量值与被替换的字面量相同，170/170 tests 通过。改动仍会让产物变化（`.js` 里由常量引用取代字面量），所以按「版本号必须唯一标识一组产物」的既有口径发版——否则 `package.json` 的 0.11.22 会同时指两组不同的构建输出，hash 链判据随之失效。
+- **同 head 的另一个文件是 monorepo 独有的**（`scripts/snapshot-http-fixtures.spec.ts`），不在镜像范围内。
+
+### 验证
+
+- `pnpm run check`（typecheck + 170/170 tests + build）全绿。
+- 对齐门禁：`no behavioural drift against f749a8c252 across 7 ported files, 1 byte-exact asset, 1 patch row set, 1 optional-peer set, and 1 peer subset`；`scripts/port-upstream-change.mjs --from 98de592a81 --to f749a8c252` 一次完成、**0 个被拒 hunk**。
+- 构建产物与 0.11.22 比对：**3 个变**（`lib/index.js` `34dfba7d603e1787`→`08ce274bb37a5e34`、`lib/interconnect/index.js` `976081ad8f7906b4`→`417d233de9787746`、`lib/tool-interconnect/index.js` `e3cf1a069d165b8c`→`e32c539fed784db6`）；`lib/skill-interconnect/index.js`、`lib/types/interconnect/types.d.ts`、asset 与 patch 不变。
+
 ## 0.11.22（2026-09-15）
 
 跟随 #3243 分支新 head（`01bb1b397e`）：让组合可以省略带 schema 默认值的 `Config` 字段。
