@@ -980,11 +980,10 @@ export class InterconnectService extends Service {
       }
       agent = woken.agent
     }
-    // Fence the live-hit path too, exactly as the Host does before handing out a
-    // live agent: a session reserved to subagent routing is delivered to by its
-    // parent, and splicing into its inbox from here would race that parent. The
-    // wake path needs no separate check because the Host's resolver applies the
-    // same fence internally.
+    // One guard covers both paths below: the live hit, exactly as the Host fences
+    // it before handing out an agent, and a session this call just woke. A
+    // session reserved to subagent routing is delivered to by its parent, so
+    // splicing into its inbox here would race that parent.
     if (isSessionOwnedBySubagent(this.ctx, agent.session, agent)) {
       return { delivered: false, instance: this.instanceId, reason: 'session-owned-by-subagent' }
     }

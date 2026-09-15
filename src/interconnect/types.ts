@@ -88,9 +88,11 @@ export interface SendPayload {
  * - `session-owned-by-subagent` — the session is reserved to subagent routing,
  *   so its parent agent owns delivery. Injecting here would race that parent;
  *   the sender must reach the child through its parent instead.
- * - `message-too-large` — the encoded frame for this message exceeds the link's
- *   frame cap (1 MiB), so nothing was written and the peer link stayed up.
- *   Retrying the same text cannot succeed; it has to be shortened.
+ * - `message-too-large` — over a writable link, the encoded frame for this
+ *   message exceeds the link's frame cap (1 MiB), so nothing was written and the
+ *   peer link stayed up. Retrying the same text cannot succeed; it has to be
+ *   shortened. A message to a peer with no writable link reports `unreachable`
+ *   first, because the link check precedes this one.
  * - `no-sender-known` — a `reply` was addressed to a local session that never
  *   recorded a sender, either because that session did not receive a message
  *   through this service or the incoming message carried no `sender` identity
