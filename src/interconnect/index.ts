@@ -423,6 +423,9 @@ export class InterconnectService extends Service {
     // throw for any of the event names used here (verified against a real
     // Context), so the window is not reachable. The teardown effect clears the
     // timer when the fiber unwinds.
+    // Protocol constants, not deployment tunables: the heartbeat cadence is
+    // fixed by the link-layer liveness contract and the backoff schedule by the
+    // reconnect policy, so both stay hardcoded like the frame vocabulary.
     this.heartbeatTimer = setInterval(() => {
       for (const socket of this.sockets) {
         // A socket that closed between sweeps must not reach ping(): ws
@@ -441,9 +444,6 @@ export class InterconnectService extends Service {
       }
     }, 30000)
 
-    // Protocol constants, not deployment tunables: the heartbeat cadence is
-    // fixed by the link-layer liveness contract and the backoff schedule by the
-    // reconnect policy, so both stay hardcoded like the frame vocabulary.
     ctx.on('agent/status', ({ agent, status }) => {
       this.fanout({ kind: 'agent/status', sessionId: String(agent.session.id), status })
     })
