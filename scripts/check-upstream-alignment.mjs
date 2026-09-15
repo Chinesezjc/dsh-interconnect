@@ -332,6 +332,28 @@ const PEER_META_PAIRS = [
 ]
 
 /**
+ * Manifests whose peer NAMES are compared as a subset. A peer here is a service
+ * the host provides, so every peer the monorepo plugin declares must also be
+ * declared by this mirror; otherwise a newly host-provided service (or a newly
+ * promoted dependency) would be silently absent from this package's manifest.
+ * The reverse direction is not drift: this mirror declares extra peers and
+ * mirrors two util packages instead of depending on them, both documented in
+ * RELEASING.md.
+ */
+const PEER_SUBSET_PAIRS = [
+  ['packages/experimental/interconnect/package.json', 'package.json'],
+]
+
+/**
+ * Read one manifest's peer names.
+ * @param text - the manifest's JSON text.
+ * @returns the sorted peer names.
+ */
+function peerNames(text) {
+  return Object.keys(JSON.parse(text).peerDependencies ?? {}).sort()
+}
+
+/**
  * Normalize one manifest's `peerDependenciesMeta` into a comparable string.
  * @param text - the manifest's JSON text.
  * @returns such as `@deepseek-ai/dsh-host-webserver{optional=true}`, or `(none)`.
@@ -364,8 +386,27 @@ for (const [upstreamPath, portedPath] of PEER_META_PAIRS) {
   )
 }
 
+for (const [upstreamPath, portedPath] of PEER_SUBSET_PAIRS) {
+  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const upstreamPeers = peerNames(upstream)
+  const localPeers = new Set(peerNames(readFileSync(join(ROOT, portedPath), 'utf8')))
+  const missing = upstreamPeers.filter(name => !localPeers.has(name))
+  if (missing.length === 0) {
+    process.stdout.write(`ok    ${portedPath} (declares every upstream peer: ${String(upstreamPeers.length)})\n`)
+    continue
+  }
+  failed = true
+  process.stdout.write(
+    `DRIFT ${portedPath}: ${String(missing.length)} upstream peer(s) not declared from ${upstreamPath}\n`
+    + missing.map(name => `  - ${name}\n`).join(''),
+  )
+}
+
 if (failed) {
   process.stdout.write(`\nbehavioural drift against ${REF} in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, and ${String(PEER_META_PAIRS.length)} optional-peer set\n`)
+process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, ${String(PEER_META_PAIRS.length)} optional-peer set, and ${String(PEER_SUBSET_PAIRS.length)} peer subset\n`)
