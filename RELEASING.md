@@ -139,7 +139,19 @@ scripts/verify-deployment.sh CI-Server 3080 /home/ubuntu/deepseek-harness/node_m
 # 参数：<ssh 别名> <本机端口> <该机 ws 包路径> [<跨腿端口>]
 ```
 
-输出每项一条 `PASS/FAIL`，任一项失败退出码非零（实测：把端口写错 → `GET / -> 000`、`WS … -> 000`、探针 `ECONNREFUSED` 三条 FAIL、exit 1）。Windows 无 POSIX shell，仍需按本文档的 `powershell -EncodedCommand` 路径逐项做。下面是这些检查的逐条说明（脚本即按此实现）：
+输出每项一条 `PASS/FAIL`，任一项失败退出码非零（实测：把端口写错 → `GET / -> 000`、`WS … -> 000`、探针 `ECONNREFUSED` 三条 FAIL、exit 1）。
+
+Windows 宿主用同名的 PowerShell 版（Windows 没有 POSIX shell，所以脚本在宿主本机跑而不是从这边 ssh 进去跑）：
+
+```sh
+scp scripts/verify-deployment.ps1 scripts/probe-deployed-link.cjs CI-Server-Windows:'C:/dsh/'
+ssh CI-Server-Windows 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\dsh\verify-deployment.ps1 -ExpectedVersion <版本> -CrossPort 19001'
+```
+
+它做同样的检查（凭据、版本、profile 层、`/` 与 `/interconnect/link` 的 401、五帧、跨腿五帧、`DSH-IC-Tunnels` 任务与出站 peer 端口），末尾把 **7 个产物 hash 打印出来供与本仓比对**（hash 每版都变，所以留在宿主机侧打印而不写死在脚本里）；任一项失败退出码非零。实测：正常时 8 项 PASS + `all checks passed`；`-Port 3999` 时 4 项 FAIL + exit 1。
+写这类宿主侧 PowerShell 时注意两点（都实际踩过）：① 字符串里 `$Var:` 会被当成盘符限定变量引用报 `InvalidVariableReferenceWithDrive`，要用 `${Var}`；② `$ErrorActionPreference='Stop'` 下**原生命令的 stderr 会被当成终止性错误**——探针失败时脚本会在报告之前直接中断（正是最该报告的那条路径），所以调用 `node` 的地方要临时切回 `Continue` 并 try/catch。
+
+下面是这些检查的逐条说明（两个脚本都按此实现）：
 
 升级或改动隧道之后，除了逐台自检，还要确认**三向互联**：服务向某个 peer 发送需要一条**拨号（出站）链路**，只看到对端拨入并不代表本机具备发送能力。
 
