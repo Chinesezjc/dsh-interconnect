@@ -94,7 +94,13 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 #   用 scripts/probe-deployed-link.cjs 打 hello/ping/list/event/msg 五种帧
 ```
 
-`dsh plugin --profile web add` 仍可用（它会顺带按安装态对账 `dsh.profile.bundles`），但只换版本时直接 `pnpm add` 更可靠，且不依赖 checkout 可运行。
+`dsh plugin --profile web add` 仍可用（它会顺带按安装态对账 `dsh.profile.bundles`），但**只换版本**时直接 `pnpm add` 更可靠，且不依赖 checkout 可运行。
+
+**但只要这次改动会改变「哪些包是 profile layer」，就必须走 `dsh plugin`**：`dsh.profile.bundles` 的对账（`reconcilePlugins`）只在 `dsh plugin` 命令路径里跑。裸 `pnpm add/remove` 只动 `package.json`/`node_modules`，bundle 列表会保持原样——
+- **加**新包用裸 `pnpm add`：列表里没有它，插件不会被挂载（静默不生效）；
+- **删**包用裸 `pnpm remove`：列表里留下悬空名字，启动时 `dsh: cannot resolve profile bundle "<name>" from the dsh installation or <profile>` 直接失败。
+
+换版本之所以能用裸 `pnpm add`，是因为 bundle 名早先已由 `dsh plugin add` 写进列表、且这一次名字没变。迁移到别的包时（例如换 `@deepseek-ai/dsh-experimental-interconnect-profile`）列表本身要改，必须用 `dsh plugin --profile web remove <旧包>` / `add <新包>`。
 
 ### 坑一：镜像滞后与重启的两处现实约束
 
