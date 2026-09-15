@@ -336,7 +336,7 @@ function recordFrames(wss: WebSocketServer): RecordedFrame[] {
   return frames
 }
 
-/** One raw ws message payload as its UTF-8 text, whatever shape ws delivered it in. */
+/** One raw ws message payload as its UTF-8 text, for each of the three `RawData` payload types (`Buffer`, `Buffer[]`, `ArrayBuffer`). */
 function frameText(data: RawData): string {
   return Array.isArray(data)
     ? Buffer.concat(data).toString('utf8')
