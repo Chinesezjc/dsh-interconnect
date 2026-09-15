@@ -103,7 +103,7 @@ pnpm add dsh-interconnect@<版本> --registry=https://registry.npmjs.org --confi
 - **重启命令**：MomoiAiri 上 `systemctl restart dsh-web` 直接可用；CI-Server 上同一条命令会报 `Interactive authentication required`（polkit），改用 `sudo -n systemctl restart dsh-web`。Windows 用 `Stop-ScheduledTask`/`Start-ScheduledTask DSH-Web`。
 - **Windows 上跑探测脚本**：`ssh <host> "powershell -EncodedCommand <b64>"` 在脚本里**内嵌文件内容**时会超命令行长度（报「命令行太长」）；先用 `scp` 把 `scripts/probe-deployed-link.cjs` 传到 `C:/dsh/`，再用短的 EncodedCommand 设好 `IC_TOKEN`/`IC_PORT`/`IC_WS` 后 `node` 它。该机 sshd 还会偶发地在命令执行前关连接，重试即可。
 
-`scripts/probe-deployed-link.cjs` 的用法：`IC_TOKEN` 必填（从该机 `$DSH_HOME/.credentials.yaml` 的 `DSH_INTERCONNECT_TOKEN` 取；它在 `refs:` 下**有两格缩进**，行首锚定的 sed 会取到空串）、`IC_PORT` 默认 3080。`IC_WS` 现在**可选**：不设时脚本解析本仓的 `ws` devDependency（在本仓 checkout 里直接可跑）；设了则用该路径（例如在某台宿主上跑时指向该机的 `ws` 包）。**不要打印 token 本身**。
+`scripts/probe-deployed-link.cjs` 的用法：`IC_TOKEN` 必填（从该机 `$DSH_HOME/.credentials.yaml` 的 `DSH_INTERCONNECT_TOKEN` 取；它在 `refs:` 下**有两格缩进**，行首锚定的 sed 会取到空串）、`IC_PORT` 默认 3080。`IC_WS` 现在**可选**：不设时脚本解析本仓的 `ws` devDependency（在本仓 checkout 里直接可跑）；设了则用该路径。**把脚本经 stdin 喂给远端 `node -` 时必须显式给 `IC_WS`**：这种跑法没有本仓解析锚点，`require('ws')` 会失败并报 `probe: \`ws\` is not resolvable`（各机路径见上面的链路检查一节）。**不要打印 token 本身**。
 
 ### 部署后的互联链路检查
 
