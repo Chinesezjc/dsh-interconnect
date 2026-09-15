@@ -2,6 +2,23 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.14（2026-09-15）
+
+跟随 #3243 分支新 head（`2638a4273911`）移植措辞改动，并修复 0.11.13 引入的 CI 红灯。
+
+### 变更
+
+- **`resume-failed` 的模型可见文本更新**（`tool-interconnect`）：`not delivered: could not wake "<id>" on <instance> (no such persisted session, or another owner holds it)` → `(no persisted session under that id, or the wake itself failed)`。上游同时把「被别的 owner 占用」明确归属到 `session-owned-by-subagent` 分支，原措辞会让人以为这两种情况都落在 `resume-failed`。
+- **两处 JSDoc 澄清**（无运行时影响）：`InterconnectService.broadcast` 补充「拨号链路已开、对端 `hello` 尚未到达」这个窗口内事件会经两个 socket 各发一次（瞬时重复，不是丢事件）；`Config.instanceId` 的唯一性说明改为描述实际的抑制规则（已有拨号链路的入站 socket 会被跳过）。
+- **CI 修复：两个新 devDependency 改为从 npm 解析**。0.11.13 把 `@deepseek-ai/dsh-typert-protocol` 与 `@deepseek-ai/dsh-api-session-controller` 的 devDependency 写成了本机路径 `link:../.dsh/source/current/...`，而独立仓库 CI 只检出 public mirror 到 `dsh/`，该路径不存在 → `check` 在 typecheck 阶段以 TS2307 失败（3 处）。现改为发布版本 `^0.1.5-rc.2`。
+- **为什么不是 `^0.1.6-alpha.1`**：该版本于 2026-09-15T03:09Z 发布，pnpm 11 默认 `minimumReleaseAge=1440` 会在本地与 CI 都拒装（`ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`）。`0.1.5-rc.2`（09-10 发布）已核实同时含 `remoteErrorOf`（根导出）与 `RemoteErrorDetailsMap` 合并声明（含 `session/agent-busy`），足以支撑 typecheck 与用例。
+- **另含**（前一提交 `cdcaf4e`）：`scripts/probe-deployed-link.cjs` 默认改为解析 `ws` devDependency，不再硬编码某台宿主上的绝对路径。
+
+### 验证
+
+- `pnpm run check`（typecheck + 161/161 tests + build）全绿，devDependency 从 registry 解析。
+- 对齐门禁：`no behavioural drift against 2638a4273911 across 7 ported files, 1 byte-exact asset, and 1 patch row set`（负例已在上游漂移时实际触发过一次：`tool-interconnect` 的消息字符串被门禁点名）。
+
 ## 0.11.13（2026-09-15）
 
 跟随 #3243 分支新 head（`dddb32d80a`）：删除运行时 peer 路由 API、链路状态机重构、唤醒失败原因更准确，并澄清回复目标语义。

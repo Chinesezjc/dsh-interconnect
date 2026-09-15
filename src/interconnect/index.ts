@@ -700,6 +700,12 @@ export class InterconnectService extends Service {
    * open, so an announcement can suppress nothing but a duplicate the
    * controlled link already carries — an impostor cannot drop an event for a
    * peer, and without a dialed link every inbound socket receives it.
+   *
+   * That holds once a peer's announcement has been seen. Between this
+   * instance's dialed link opening and the peer's `hello` arriving on its
+   * inbound socket, the inbound socket is not yet attributable, so an event
+   * emitted in that window leaves over both sockets and reaches that peer
+   * twice. The duplicate is transient and never a dropped event.
    */
   private broadcast(notification: EventNotification): void {
     if (this.sockets.size === 0) return

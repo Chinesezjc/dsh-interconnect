@@ -139,7 +139,7 @@ export function apply(ctx: Context): void {
               return `not delivered: ${value.instance} does not allow waking persisted sessions`
             case 'resume-failed':
               return `not delivered: could not wake "${_args.sessionId}" on ${value.instance}`
-                + ' (no such persisted session, or another owner holds it)'
+                + ' (no persisted session under that id, or the wake itself failed)'
             case 'session-owned-by-subagent':
               return `not delivered: "${_args.sessionId}" is a subagent's session on ${value.instance}`
                 + ' — its parent agent owns delivery, so reach it through that parent'

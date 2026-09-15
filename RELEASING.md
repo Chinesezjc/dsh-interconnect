@@ -71,7 +71,14 @@ node --import <checkout>/node_modules/tsx/dist/esm/index.mjs apps/cli/src/bin.ts
 #   用 scripts/probe-deployed-link.cjs 打 hello/ping/list/event/msg 五种帧
 ```
 
-`scripts/probe-deployed-link.cjs` 的用法：`IC_TOKEN` 必填（从该机 `$DSH_HOME/.credentials.yaml` 的 `DSH_INTERCONNECT_TOKEN` 取；它在 `refs:` 下**有两格缩进**，行首锚定的 sed 会取到空串）、`IC_PORT` 默认 3080、`IC_WS` 指向该机的 `ws` 包路径。**不要打印 token 本身**。
+`scripts/probe-deployed-link.cjs` 的用法：`IC_TOKEN` 必填（从该机 `$DSH_HOME/.credentials.yaml` 的 `DSH_INTERCONNECT_TOKEN` 取；它在 `refs:` 下**有两格缩进**，行首锚定的 sed 会取到空串）、`IC_PORT` 默认 3080。`IC_WS` 现在**可选**：不设时脚本解析本仓的 `ws` devDependency（在本仓 checkout 里直接可跑）；设了则用该路径（例如在某台宿主上跑时指向该机的 `ws` 包）。**不要打印 token 本身**。
+
+### 坑三：devDependency 不能写本机路径
+
+本仓 CI 只检出 public mirror 到工作区的 `dsh/`，所以 devDependency 只有两种写法能在 CI 里解析：`link:../dsh/...`（sibling checkout 内的未发布包），或 registry 上的已发布版本。写任何本机路径（如 `link:../.dsh/source/current/...`）在本地能过、在 CI 的 typecheck 阶段必红（`TS2307`），且 `pnpm install` 不会提前报错。
+
+为新增 devDependency 选 registry 版本时先看发布时间：pnpm 11 的 `minimumReleaseAge=1440` 会拒绝 24 小时内发布的版本（见坑一），所以别直接选当天的 alpha；用 `npm view <pkg> time --json` 确认，并核实该版本确实导出需要的符号。
+
 
 ### 坑一：pnpm 的供应链年龄门禁
 

@@ -82,7 +82,9 @@ export interface SendPayload {
  * - `resume-refused` — the sender asked to wake a persisted session and this
  *   receiver does not allow it. Retrying with `resume` set changes nothing.
  * - `resume-failed` — waking was allowed and attempted but did not yield a live
- *   agent (no persisted session under that id, or another owner holds it).
+ *   agent (no persisted session under that id, or the wake itself failed). A
+ *   session another owner holds is reported as `session-owned-by-subagent`
+ *   instead.
  * - `session-owned-by-subagent` — the session is reserved to subagent routing,
  *   so its parent agent owns delivery. Injecting here would race that parent;
  *   the sender must reach the child through its parent instead.
@@ -263,9 +265,10 @@ export type LinkMessage = {
 export interface Config {
   /**
    * Self-reported id of this instance, echoed in ping/send results for diagnostics.
-   * It must be unique across the mesh: lifecycle fan-out addresses links by this
-   * announcement, so two instances sharing one id receive events on only one of
-   * their links.
+   * It must be unique across the mesh: an inbound socket announcing an id that an
+   * open dialed link already covers is skipped, so two instances sharing one id
+   * receive events only over the link this instance dials; with no dialed link
+   * for that id both receive them and the sender's peer sees every event twice.
    */
   readonly instanceId: string
   /** Request timeout for outbound deliveries, in milliseconds. */
