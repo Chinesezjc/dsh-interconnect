@@ -1,7 +1,16 @@
 // Protocol-level probe against a running instance's interconnect link.
 // Reads the bearer token from IC_TOKEN (never printed) and exercises the same
 // path a peer uses: WS upgrade with auth, then query frames.
-const WebSocket = require(process.env.IC_WS ?? '/home/ubuntu/deepseek-harness/node_modules/.pnpm/ws@8.21.0/node_modules/ws')
+// IC_WS overrides the WebSocket module path; the default resolves the `ws`
+// devDependency so the probe runs from any checkout instead of one host path.
+const WebSocket = (() => {
+  if (process.env.IC_WS) return require(process.env.IC_WS)
+  try {
+    return require('ws')
+  } catch {
+    throw new Error('probe: `ws` is not resolvable; install devDependencies or set IC_WS to a ws module path')
+  }
+})()
 const token = process.env.IC_TOKEN ?? ''
 const ws = new WebSocket(`ws://127.0.0.1:${process.env.IC_PORT ?? '3080'}/interconnect/link`, {
   headers: { authorization: `Bearer ${token}` },
