@@ -1395,6 +1395,84 @@ describe('interconnect inbound frame handling on a fake socket', () => {
     }
   })
 
+  it('keeps the complete answer inside the frame cap for the longest request id and instance id it accepts', async () => {
+    const long = 'x'.repeat(20_000)
+    const liveIds = Array.from({ length: 100 }, (_unused, index) => `session-${String(index)}`)
+    // Both the request id the answer echoes and this instance's own id are part
+    // of the frame, so the row budget has to be measured against them rather
+    // than reserved with a constant.
+    const instanceId = `inst-${'i'.repeat(5000)}`
+    const receiver = await mounted('secret', new Set(liveIds), {}, 'followup', true, instanceId, {
+      provides: {
+        sessionProjections: {
+          snapshot: (session: { id: string }) => ({ values: { title: `${session.id}:${long}` } }),
+        },
+      },
+    })
+    try {
+      const { socket, handlers } = fakeSocket()
+      attachSocket(receiver.service, socket)
+      const sentBefore = socket.sent.length
+      const reqId = `q-${'r'.repeat(254)}`
+      handlers.get('message')!(JSON.stringify({ type: 'query', reqId, query: { kind: 'list' } }))
+      await wait(30)
+      const frames = socket.sent.slice(sentBefore).map(text => JSON.parse(text) as Record<string, unknown>)
+      expect(frames).toHaveLength(1)
+      expect(Buffer.byteLength(JSON.stringify(frames[0]), 'utf8')).toBeLessThanOrEqual(1024 * 1024)
+      // The measured budget still lists as many rows as fit, so the bound
+      // truncates the listing instead of emptying it.
+      const rows = (frames[0]?.result as { sessions: unknown[] }).sessions
+      expect(rows.length).toBeGreaterThan(0)
+      expect(Buffer.byteLength(JSON.stringify(frames[0]), 'utf8')).toBeGreaterThan(1024 * 1024 - 20_000)
+    } finally {
+      await receiver.dispose()
+    }
+  })
+
+  it('drops a request whose id exceeds the identifier bound instead of echoing it into an over-cap answer', async () => {
+    const long = 'x'.repeat(20_000)
+    const liveIds = Array.from({ length: 100 }, (_unused, index) => `session-${String(index)}`)
+    const receiver = await mounted('secret', new Set(liveIds), {}, 'followup', true, 'test-instance', {
+      provides: {
+        sessionProjections: {
+          snapshot: (session: { id: string }) => ({ values: { title: `${session.id}:${long}` } }),
+        },
+      },
+    })
+    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
+    try {
+      const { socket, handlers } = fakeSocket()
+      attachSocket(receiver.service, socket)
+      const sentBefore = socket.sent.length
+      handlers.get('message')!(JSON.stringify({ type: 'query', reqId: `q-${'r'.repeat(8192)}`, query: { kind: 'list' } }))
+      await wait(30)
+      expect(socket.sent.slice(sentBefore)).toHaveLength(0)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('dropping malformed link frame'))
+    } finally {
+      warn.mockRestore()
+      await receiver.dispose()
+    }
+  })
+
+  it('does not answer a list request whose envelope alone exceeds the frame cap', async () => {
+    // An instance id larger than the link cap makes even an empty answer
+    // unsendable; writing one would make the peer's ws drop the link.
+    const receiver = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'i'.repeat(1024 * 1024 + 1))
+    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
+    try {
+      const { socket, handlers } = fakeSocket()
+      attachSocket(receiver.service, socket)
+      const sentBefore = socket.sent.length
+      handlers.get('message')!(JSON.stringify({ type: 'query', reqId: 'list-1', query: { kind: 'list' } }))
+      await wait(30)
+      expect(socket.sent.slice(sentBefore)).toHaveLength(0)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('cannot fit the link frame cap'))
+    } finally {
+      warn.mockRestore()
+      await receiver.dispose()
+    }
+  })
+
   it('counts a multibyte title by its serialized bytes', async () => {
     // 200k code points, 600 KB once serialized as UTF-8.
     const long = '解'.repeat(200_000)

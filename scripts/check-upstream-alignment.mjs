@@ -320,8 +320,52 @@ for (const [upstreamPath, portedPath] of PATCH_ID_PAIRS) {
   )
 }
 
+/**
+ * Manifests whose `peerDependenciesMeta` must agree. Marking a peer optional is
+ * install-visible: a deployment without that peer still installs the plugin
+ * instead of failing peer resolution, so a hand-copied manifest can silently
+ * change what `npm install` does. Only this map is compared; the peer NAMES
+ * differ by design between the scoped monorepo package and this one.
+ */
+const PEER_META_PAIRS = [
+  ['packages/experimental/interconnect/package.json', 'package.json'],
+]
+
+/**
+ * Normalize one manifest's `peerDependenciesMeta` into a comparable string.
+ * @param text - the manifest's JSON text.
+ * @returns such as `@deepseek-ai/dsh-host-webserver{optional=true}`, or `(none)`.
+ */
+function peerMeta(text) {
+  const meta = JSON.parse(text).peerDependenciesMeta ?? {}
+  const entries = Object.keys(meta).sort().map((name) => {
+    const flags = Object.keys(meta[name]).sort().map(key => `${key}=${String(meta[name][key])}`).join(',')
+    return `${name}{${flags}}`
+  })
+  return entries.length === 0 ? '(none)' : entries.join(' ')
+}
+
+for (const [upstreamPath, portedPath] of PEER_META_PAIRS) {
+  const upstream = execFileSync('git', ['-C', WORKTREE, 'show', `${REF}:${upstreamPath}`], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const upstreamMeta = peerMeta(upstream)
+  const portedMeta = peerMeta(readFileSync(join(ROOT, portedPath), 'utf8'))
+  if (upstreamMeta === portedMeta) {
+    process.stdout.write(`ok    ${portedPath} (peerDependenciesMeta matches: ${upstreamMeta})\n`)
+    continue
+  }
+  failed = true
+  process.stdout.write(
+    `DRIFT ${portedPath}: peerDependenciesMeta diverges from ${upstreamPath}\n`
+    + `  upstream: ${upstreamMeta}\n`
+    + `  local:    ${portedMeta}\n`,
+  )
+}
+
 if (failed) {
   process.stdout.write(`\nbehavioural drift against ${REF} in ${WORKTREE}; port the change or extend the adaptation rules\n`)
   process.exit(1)
 }
-process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, and ${String(PATCH_ID_PAIRS.length)} patch row set\n`)
+process.stdout.write(`\nno behavioural drift against ${REF} across ${String(PAIRS.length)} ported files, ${String(EXACT_PAIRS.length)} byte-exact asset, ${String(PATCH_ID_PAIRS.length)} patch row set, and ${String(PEER_META_PAIRS.length)} optional-peer set\n`)

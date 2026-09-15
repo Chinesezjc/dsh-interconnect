@@ -117,19 +117,11 @@ const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
 /** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
 /**
- * Bytes reserved inside {@link MAX_LINK_FRAME_BYTES} for one `query-result`
- * frame's envelope: its type, `reqId`, instance id, and JSON syntax.
+ * Longest request id one inbound frame may carry. Every answer repeats the
+ * peer's `reqId`, so an unbounded id would decide the size of the frame this
+ * instance writes back; the ids this plugin generates are about 40 characters.
  */
-const LIST_FRAME_ENVELOPE_BYTES = 4096
-/**
- * Bytes one `list` answer may spend on its `sessions` rows. The answer has to
- * stay inside {@link MAX_LINK_FRAME_BYTES} because ws closes a link that
- * receives an over-cap frame, and the sender then reads the call as
- * unreachable. A row's title comes from the session-title projection, whose
- * configured length bound is independent of this frame, so the row count alone
- * cannot bound the answer.
- */
-const MAX_LIST_ROWS_BYTES = MAX_LINK_FRAME_BYTES - LIST_FRAME_ENVELOPE_BYTES
+const MAX_REQUEST_ID_CHARS = 256
 /**
  * Maximum session rows one `list` answer carries, so a very large live set
  * still answers with a bounded number of targets. A consumer that renders the
@@ -312,10 +304,10 @@ const msgResultSchema = z.union([
 const linkFrameSchema = z.union([
   z.object({ type: z.const('hello').required(), sender: z.string().required() }),
   z.object({ type: z.const('event').required(), notification: notificationSchema.required() }),
-  z.object({ type: z.const('msg').required(), reqId: z.string().required(), message: messageSchema.required() }),
-  z.object({ type: z.const('msg-result').required(), reqId: z.string().required(), result: msgResultSchema.required() }),
-  z.object({ type: z.const('query').required(), reqId: z.string().required(), query: querySchema.required() }),
-  z.object({ type: z.const('query-result').required(), reqId: z.string().required(), result: queryResultSchema.required() }),
+  z.object({ type: z.const('msg').required(), reqId: z.string().max(MAX_REQUEST_ID_CHARS).required(), message: messageSchema.required() }),
+  z.object({ type: z.const('msg-result').required(), reqId: z.string().max(MAX_REQUEST_ID_CHARS).required(), result: msgResultSchema.required() }),
+  z.object({ type: z.const('query').required(), reqId: z.string().max(MAX_REQUEST_ID_CHARS).required(), query: querySchema.required() }),
+  z.object({ type: z.const('query-result').required(), reqId: z.string().max(MAX_REQUEST_ID_CHARS).required(), result: queryResultSchema.required() }),
 ])
 
 /**
@@ -756,7 +748,16 @@ export class InterconnectService extends Service {
     if (query.kind === 'ping') {
       result = { pong: true, instance: this.instanceId }
     } else if (query.kind === 'list') {
-      result = this.listSessions()
+      const rowBudget = this.listRowsBudgetBytes(reqId)
+      if (rowBudget < 0) {
+        // The answer's own envelope already exceeds the link cap, so no listing
+        // can be sent: writing one would make the peer's ws drop the link, and
+        // the caller would read the truncation as a transport failure. Nothing
+        // is written, so the request times out and reports exactly that.
+        this.ctx.logger.warn('interconnect: list answer cannot fit the link frame cap; not answering')
+        return
+      }
+      result = this.listSessions(rowBudget)
     } else {
       const payload: EventPayload = {
         sender: this.peerOf.get(socket) ?? 'unknown-peer',
@@ -794,18 +795,44 @@ export class InterconnectService extends Service {
   }
 
   /**
+   * Bytes one `list` answer may spend on its `sessions` rows: the frame cap
+   * minus the serialized envelope that answer will carry. The envelope holds
+   * the peer-supplied `reqId` and this instance's own id, so it is measured per
+   * answer instead of reserved with a fixed constant.
+   * @param reqId - the request id the answer has to echo.
+   * @returns the byte budget for the rows, negative when even an empty answer
+   * exceeds the cap and so cannot be sent at all.
+   */
+  private listRowsBudgetBytes(reqId: string): number {
+    const envelope: LinkFrame = {
+      type: 'query-result',
+      reqId,
+      result: { sessions: [], instance: this.instanceId },
+    }
+    return MAX_LINK_FRAME_BYTES - Buffer.byteLength(JSON.stringify(envelope), 'utf8')
+  }
+
+  /**
    * Summarize the live local sessions so a sender can discover valid targets
    * instead of having to know a session id already. Only live agents are listed
-   * because `send` can reach exactly those, and the answer carries at most
-   * {@link MAX_LISTED_SESSIONS} rows so a large live set cannot push the
-   * `query-result` frame past the link's frame cap.
+   * because `send` can reach exactly those. The answer stops at
+   * {@link MAX_LISTED_SESSIONS} rows or at the row budget the answer's own
+   * envelope leaves, whichever comes first: that budget is what keeps the
+   * complete `query-result` frame inside the link's cap, because a title's
+   * length comes from the session-title projection's own bound rather than
+   * from anything this listing controls. A title that does not fit the
+   * remaining budget is dropped so its target stays listed; a row that does not
+   * fit even untitled ends the listing, which keeps the answer a prefix of the
+   * registration order instead of a set with gaps.
    *
    * Title and status are best-effort: the title projection is an optional
    * service, and a receiver without it still returns the ids. A projection that
    * throws degrades that one row rather than failing the whole listing, which
    * matches how the Host's own session listing treats its projection column.
+   * @param rowBudgetBytes - bytes the `sessions` rows may occupy, envelope excluded.
+   * @returns the bounded listing.
    */
-  private listSessions(): ListResult {
+  private listSessions(rowBudgetBytes: number): ListResult {
     // `agents.list()` includes subagent children; a row this instance would
     // refuse to deliver to must not be advertised as a target, or the listing
     // contradicts `send`.
@@ -816,7 +843,7 @@ export class InterconnectService extends Service {
     for (const agent of reachable.slice(0, MAX_LISTED_SESSIONS)) {
       const row = this.sessionRow(agent)
       const sized = used + rowBytes(row)
-      if (sized > MAX_LIST_ROWS_BYTES) {
+      if (sized > rowBudgetBytes) {
         // A title is best-effort: a row whose title does not fit keeps its
         // target and drops the title before it drops out of the listing.
         const untitled = {
@@ -826,7 +853,7 @@ export class InterconnectService extends Service {
         const untitledSized = used + rowBytes(untitled)
         // A row that does not fit even untitled ends the listing: adding a
         // shorter later row would report the set out of order.
-        if (untitledSized > MAX_LIST_ROWS_BYTES) break
+        if (untitledSized > rowBudgetBytes) break
         sessions.push(untitled)
         used = untitledSized
         continue

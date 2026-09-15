@@ -1,7 +1,7 @@
 {
   "name": "dsh-interconnect",
   "description": "Cross-instance message/event handoff plugins for DeepSeek Harness (DSH): interconnect service + model-facing tools + companion skill",
-  "version": "0.11.14",
+  "version": "0.11.15",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -63,6 +63,11 @@
     "@deepseek-ai/dsh-invariants": "*",
     "@deepseek-ai/schemastery": "*",
     "ws": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../dsh/vendor/cordis",

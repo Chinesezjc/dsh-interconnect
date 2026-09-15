@@ -2,6 +2,23 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.15（2026-09-15）
+
+跟随 #3243 分支新 head（`7e671e5c72e9`）：把 `list` 应答的帧预算从固定常量改为按应答实测，并给入站 `reqId` 加上长度上限。
+
+### 变更
+
+- **`list` 应答按应答实测预算**：删除固定常量 `LIST_FRAME_ENVELOPE_BYTES` / `MAX_LIST_ROWS_BYTES`，改为 `listRowsBudgetBytes(reqId)` —— 用 `JSON.stringify` 实测这一条 `query-result` 的空信封（含peer 提供的 `reqId` 与本实例 id）占多少字节，再把 `MAX_LINK_FRAME_BYTES` 减去它作为行预算。原因是信封大小取决于对端送来的 `reqId`：预留固定常量既可能浪费预算、又挡不住超长 id 把整帧顶过上限（ws 收到超限帧会断开链路，发送方把截断读成传输失败）。信封本身都放不下时不再写任何东西（记一条 warn 后返回），让对端按超时处理，而不是写出一帧必然被断链的应答。
+- **入站 `reqId` 加 256 字符上限**：四个带 `reqId` 的帧（`msg` / `msg-result` / `query` / `query-result`）schema 加 `.max(MAX_REQUEST_ID_CHARS)`。应答必须回显对端给的 id，无上限的 id 等于让对端决定本实例写出的帧有多大；本插件自己生成的 id 约 40 字符。超限的帧按既有 malformed 路径丢弃并记 `dropping malformed link frame`。
+- **`@deepseek-ai/dsh-host-webserver` 标记为可选 peer**（`peerDependenciesMeta.optional`）：没有 webserver 的部署仍能安装本插件（服务照常拨号出站 peer，只是不接受入站链路）。门禁相应新增第 8 项校验：本仓 `package.json` 的 `peerDependenciesMeta` 必须与上游 `packages/experimental/interconnect/package.json` 一致（只比这张表，不比 peer 名——scoped 与 unscoped 的包名本就不同）。
+- **上游新增 3 条用例**（`tests/interconnect.host.spec.ts`，1:1 移植）：最长可接受 `reqId` + 超长 instance id 下整帧仍在 1 MiB 以内且仍列出若干行；超限 `reqId` 被丢弃且不产生任何帧；信封本身就超限时不作答。
+
+### 验证
+
+- `pnpm run check`（typecheck + 164/164 tests + build）全绿（用例数 161 → 164）。
+- 对齐门禁：`no behavioural drift against 7e671e5c72e9 across 7 ported files, 1 byte-exact asset, 1 patch row set, and 1 optional-peer set`。新增的 `peerDependenciesMeta` 检查做过负例（删掉该键 → DRIFT + exit 1，还原后绿）。
+- 移植时 `src/interconnect/index.ts` 有 1 个 hunk 被拒：本仓该处 JSDoc 停留在更早的注释版本（注释漂移不被门禁视为行为差异），导致上下文不匹配；已按上游原文重写该段注释并补上 `listRowsBudgetBytes`，使该区域与上游逐字一致。
+
 ## 0.11.14（2026-09-15）
 
 跟随 #3243 分支新 head（`2638a4273911`）移植措辞改动，并修复 0.11.13 引入的 CI 红灯。
