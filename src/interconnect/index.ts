@@ -304,7 +304,7 @@ const querySchema = z.union([
 /**
  * Wire union of one `send` answer: the success branch carries the mode the
  * receiver used, and the failure branches carry only the reasons a receiver can
- * answer with — the reply-side reasons (`message-too-large`, `no-sender-known`)
+ * answer with — the local-only reasons (`message-too-large`, `no-sender-known`)
  * are produced locally and never cross the link.
  */
 const msgResultSchema = z.union([

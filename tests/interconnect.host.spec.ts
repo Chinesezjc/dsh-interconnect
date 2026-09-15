@@ -504,13 +504,12 @@ describe('inbound msg/query frames on a served link', () => {
     const { client, frames, waitOpen } = await dial(port)
     try {
       await waitOpen
-      await wait(50) // hello
       client.send(JSON.stringify({
         type: 'msg',
         reqId: 'req-1',
         message: { kind: 'send', sessionId: SESSION_ID, text: 'ws hello' },
       }))
-      await wait(80)
+      await waitUntil(() => frames.some(frame => frame.reqId === 'req-1'))
       expect(deliveries.get(SESSION_ID)).toEqual(['ws hello'])
       expect(frames).toContainEqual({
         type: 'msg-result',
@@ -530,9 +529,8 @@ describe('inbound msg/query frames on a served link', () => {
     const { client, frames, waitOpen } = await dial(port)
     try {
       await waitOpen
-      await wait(50)
       client.send(JSON.stringify({ type: 'query', reqId: 'q-1', query: { kind: 'ping' } }))
-      await wait(80)
+      await waitUntil(() => frames.some(frame => frame.reqId === 'q-1'))
       expect(frames).toContainEqual({
         type: 'query-result',
         reqId: 'q-1',
@@ -551,9 +549,8 @@ describe('inbound msg/query frames on a served link', () => {
     const { client, frames, waitOpen } = await dial(port)
     try {
       await waitOpen
-      await wait(50)
       client.send(JSON.stringify({ type: 'query', reqId: 'q-2', query: { kind: 'list' } }))
-      await wait(80)
+      await waitUntil(() => frames.some(frame => frame.reqId === 'q-2'))
       const result = frames.find(f => f.type === 'query-result' && f.reqId === 'q-2') as { result: { sessions: unknown[] } } | undefined
       expect(result?.result.sessions?.map(s => (s as { sessionId: string }).sessionId).sort()).toEqual(['s1', 's2'])
     } finally {
@@ -569,7 +566,7 @@ describe('inbound msg/query frames on a served link', () => {
     const { client, frames, waitOpen } = await dial(port)
     try {
       await waitOpen
-      await wait(80)
+      await waitUntil(() => frames.some(frame => frame.type === 'hello'))
       expect(frames).toContainEqual({ type: 'hello', sender: 'test-instance' })
     } finally {
       client.terminate()
@@ -680,7 +677,7 @@ describe('interconnect lifecycle event fan-out', () => {
       sender.ctx.emit('session/disposed', { id: 's6' } as never)
       sender.ctx.emit('subagent/end', { local: false, provider: 'remote', id: 'c1', stopReason: 'done' } as never)
       sender.ctx.emit('subagent/end', { local: true, provider: 'spawn', id: 'c2', stopReason: 'done' } as never)
-      await wait(120)
+      await waitUntil(() => seen.length >= 7)
       expect(seen).toEqual(expect.arrayContaining([
         { kind: 'agent/status', sessionId: 's1', status: 'idle' },
         { kind: 'agent/created', sessionId: 's2' },
@@ -829,7 +826,6 @@ describe('interconnect delivery modes and wake', () => {
     const { client, frames, waitOpen } = await dial(port)
     try {
       await waitOpen
-      await wait(50)
       client.send(JSON.stringify({
         type: 'msg',
         reqId: 'r1',
@@ -840,7 +836,7 @@ describe('interconnect delivery modes and wake', () => {
         reqId: 'r2',
         message: { kind: 'send', sessionId: SESSION_ID, text: 'inject now', delivery: 'inject' },
       }))
-      await wait(80)
+      await waitUntil(() => frames.some(frame => frame.reqId === 'r1') && frames.some(frame => frame.reqId === 'r2'))
       expect(methods.get(SESSION_ID)).toEqual(['steer', 'inject'])
       expect(frames).toContainEqual({
         type: 'msg-result',
@@ -1053,7 +1049,10 @@ describe('interconnect delivery modes and wake', () => {
       // The accepted and refused texts are adjacent, so the pair pins the cap
       // byte-exactly instead of leaving slack. With an empty text and the same
       // `m<counter>-<uuid>` request id length, this placeholder carries only
-      // the fixed fields every send frame adds around the text.
+      // the fixed fields every send frame adds around the text. The one-digit
+      // counter holds because this sender mints at most three request ids (the
+      // readiness ping and the two sends); a case that adds requests in front of
+      // these would need the matching digit count here.
       const frameOverhead = ((): number => {
         const placeholder: LinkFrame = {
           type: 'msg',

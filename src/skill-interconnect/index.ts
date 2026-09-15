@@ -27,6 +27,10 @@ const SKILL_BODY_URL = new URL('../../assets/dsh-interconnect.md', import.meta.u
 const INVOCATION = { modelInvocable: true, userInvocable: true } as const
 const DESCRIPTION = 'Use the dsh-interconnect tools to exchange messages between DSH sessions, instances, and machines: list live sessions on a known peer instance, send messages, reply to the last sender, and probe liveness. Use whenever you need to message another DSH agent, coordinate across sessions, or respond to an incoming interconnect handoff.'
 /* jscpd:ignore-start -- the bundled-skill provider shape is the same required boilerplate as skill-badge. */
+// Unlike skill-badge, this candidate carries no `resourceBase`: `assets/` holds
+// only the body already inlined as `<skill_instructions>`, and a directory base
+// renders this installation's absolute path into model-visible text, which a
+// recorded session cannot replay elsewhere.
 const CANDIDATE: SkillCandidate = {
   name: 'dsh-interconnect',
   description: DESCRIPTION,
