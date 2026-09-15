@@ -322,6 +322,20 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
   }
 }
 
+/**
+ * Record every frame a raw peer receives, so a case can wait for the dial's
+ * `hello` and then assert that its own request went out.
+ * @param wss - the raw peer whose connections to observe.
+ * @returns the frame log, appended in arrival order.
+ */
+function recordFrames(wss: WebSocketServer): RecordedFrame[] {
+  const frames: RecordedFrame[] = []
+  wss.on('connection', (socket) => {
+    socket.on('message', (data) => { frames.push(JSON.parse(frameText(data)) as RecordedFrame) })
+  })
+  return frames
+}
+
 /** One raw ws message payload as its UTF-8 text, whatever shape ws delivered it in. */
 function frameText(data: RawData): string {
   return Array.isArray(data)
@@ -2025,13 +2039,7 @@ describe('interconnect outbound reply timeouts', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
-    const frames: RecordedFrame[] = []
-    wss.on('connection', (socket) => {
-      socket.on('message', (data) => {
-        const text = frameText(data)
-        frames.push(JSON.parse(text) as RecordedFrame)
-      })
-    })
+    const frames = recordFrames(wss)
     const receiver = await mounted('secret', new Set(['recv-sess']), { 'inst-send': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
       // Record a sender for the local session, then reply over the silent link.
@@ -2061,13 +2069,7 @@ describe('interconnect outbound timeouts', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
-    const frames: RecordedFrame[] = []
-    wss.on('connection', (socket) => {
-      socket.on('message', (data) => {
-        const text = frameText(data)
-        frames.push(JSON.parse(text) as RecordedFrame)
-      })
-    })
+    const frames = recordFrames(wss)
     const sender = await mounted('secret', new Set([]), { 'silent-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
       await awaitRawHello(frames)
@@ -2390,13 +2392,7 @@ describe('interconnect query-result answer validation', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
-    const frames: RecordedFrame[] = []
-    wss.on('connection', (socket) => {
-      socket.on('message', (data) => {
-        const text = frameText(data)
-        frames.push(JSON.parse(text) as RecordedFrame)
-      })
-    })
+    const frames = recordFrames(wss)
     const sender = await mounted('secret', new Set([]), { 'silent-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 100 })
     try {
       await awaitRawHello(frames)
@@ -2415,13 +2411,7 @@ describe('interconnect query-result answer validation', () => {
     const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => { wss.once('listening', resolve) })
     const address = wss.address() as AddressInfo
-    const frames: RecordedFrame[] = []
-    wss.on('connection', (socket) => {
-      socket.on('message', (data) => {
-        const text = frameText(data)
-        frames.push(JSON.parse(text) as RecordedFrame)
-      })
-    })
+    const frames = recordFrames(wss)
     const sender = await mounted('secret', new Set([]), { 'silent-peer': `http://127.0.0.1:${String(address.port)}` }, 'followup', true, 'test-instance', { requestTimeoutMs: 10000 })
     try {
       await awaitRawHello(frames)
