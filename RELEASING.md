@@ -202,3 +202,18 @@ ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION
 
 - 本仓 CI 检出的是**公开镜像** `deepseek-ai/deepseek-harness` 的 master，它落后于活跃开发仓（合并工作发生在私有仓）。因此 **CI 绿不等于"对当前宿主可用"** —— 宿主兼容性由运行中的实例体现。
 - 对齐门禁读的是私有仓工作区的真实 head，不受镜像滞后影响。
+
+## 六、迁到 monorepo 的 profile 层（#3243 合入后执行）
+
+三台部署最终要改成挂 monorepo 里的 `@deepseek-ai/dsh-experimental-interconnect-profile`（它只在合入后存在于主仓，**不在 npm 上**）。本节只记**与验收脚本相关**的差异；逐步操作清单在会话记忆 `~/.dsh/MEMORY.md` 的「合入日迁移清单」。以下每条都实测过。
+
+**硬前提：宿主 checkout 必须先前进。** profile 层解析顺序是「先 dsh 安装、再 profile 目录」，而 `apps/cli/package.json` 把该 profile 包声明为 `workspace:^` —— 所以**宿主 checkout 里没有 `packages/experimental/interconnect-profile/` 时，bundle 名无法解析，启动直接失败**。实测三台 checkout 同为 `8d2ffaa3e9`，该 revision 下 interconnect 相关文件数 = 0。顺序必须是：ff checkout → `pnpm install --frozen-lockfile` → `pnpm run build` → 改 profile → 重启（**这中间不要重启**，见记忆里的顺序警告）。
+
+**行 id 不变，所以宿主 `cordis.patch.yml` 一个字都不用改。** 实测 profile 包的 `cordis.patch.yml` 插入的三行 id 与本仓完全一致（`interconnect`/`tool-interconnect`/`skill-interconnect`），只有 `name` 不同（`dsh-interconnect/<subpath>` → `@deepseek-ai/dsh-experimental-*`）；`interconnect` 行的默认 config 也相同（`instanceId: dsh`、`requestTimeoutMs: 10000`）。宿主覆盖层按**行 id** 命中，`instanceId`/`peers` 照样落上去。
+
+**验收脚本有两项检查在迁移后失去意义，不要当成故障：**
+
+1. `verify-deployment.sh` / `verify-deployment.ps1` 里「已装版本 == 本仓 `package.json` 版本」与「产物 hash 链 == 本仓构建」这两项，只对**独立包**成立。迁移后 profile 挂的是 monorepo 包，包名与内部导入都不同，`lib/` 必然与本仓构建不同。
+2. hash 判据降级为**同一包同一版本跨机一致**（三台互相逐字相同），而不是与本仓比。版本与层名单改为读 profile 的 `package.json`（`dsh.profile.bundles`）与装入的那个包的 manifest。
+
+**回滚**：还原 profile 备份三件套 + 在 profile 目录 `pnpm add dsh-interconnect@<迁移前那版> --registry=https://registry.npmjs.org --config.minimumReleaseAge=0`（版本号在备份里读，别照抄本文）+ 把 checkout `git reset --hard <迁移前的 HEAD>`。独立包继续留在 npm 上正是为了这条路可用，所以**不要**撤下或 deprecate 它。
