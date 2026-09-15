@@ -152,9 +152,10 @@ export interface InterconnectSessionSummary {
   /** The session id to pass back as `SendPayload.sessionId`. */
   readonly sessionId: string
   /**
-   * The session's title when a title projection is available. Absent rather
-   * than empty when the projection is missing or the session has no title yet,
-   * so a caller can tell "untitled" from "titles unavailable on this receiver".
+   * The session's title when the receiver could supply one. Absent when the
+   * projection is missing, the session has no title yet, or the title did not
+   * fit the answer's size bound, so an absent title says nothing about whether
+   * that session is titled.
    */
   readonly title?: string
   /** The agent's current status, so a sender can prefer an idle target. */
@@ -164,8 +165,10 @@ export interface InterconnectSessionSummary {
 /** Business result of a `list` call. */
 export interface ListResult {
   /**
-   * Live sessions in registration order, capped at the 100-row limit one
-   * answer may carry so the frame stays inside the link's size bound.
+   * Live sessions in registration order. The answer is truncated at 100 rows or
+   * when its serialized rows reach the link's frame bound, whichever comes
+   * first, so a truncated answer is a prefix of this order rather than a
+   * complete set.
    */
   readonly sessions: readonly InterconnectSessionSummary[]
   /** Echoed receiver instance id (diagnostic; never trusted for routing). */
@@ -245,9 +248,12 @@ export type LinkFrame =
   | { readonly type: 'query-result'; readonly reqId: string; readonly result: unknown }
 
 /**
- * A request/response query carried by `query`/`query-result` frames, used for
- * the discovery endpoints (`ping`, `list`) over the persistent link. `ping`
- * answers the peer's identity; `list` answers the peer's live session rows.
+ * A request/response query carried by `query`/`query-result` frames over the
+ * persistent link. `ping` answers the peer's identity, `list` answers the
+ * peer's live session rows, and `event` pushes one lifecycle notification from
+ * a peer that delivers events as queries; this instance pushes its own events
+ * as `event` frames, so the `event` query is accepted only for peers that use
+ * it.
  */
 export type QueryMessage =
   | { readonly kind: 'ping' }
@@ -274,6 +280,8 @@ export type LinkMessage = {
 export interface Config {
   /**
    * Self-reported id of this instance, echoed in ping/send results for diagnostics.
+   * At most 256 characters: every frame this instance writes carries it, so a
+   * longer id could not fit the link's frame cap.
    * It must be unique across the mesh: an inbound socket announcing an id that an
    * open dialed link already covers is skipped, so two instances sharing one id
    * receive events only over the link this instance dials; with no dialed link
