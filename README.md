@@ -3,6 +3,8 @@
 跨实例消息互通与事件通知插件，用于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH)。
 让一个 DSH 实例能向同一个实例、另一台机器、或另一台机器上的别的 DSH 实例发送消息、探测活性，并在实例之间双向推送事件。
 
+> **项目状态（2026-09-16）**：本仓库是该插件的**树外（out-of-tree）主源**。并入 DSH monorepo 的计划（PR #3243）已按「保持树外」的评审意见关闭；插件继续经 npm 分发（`dsh-interconnect`），并由团队内部的插件集合仓以 git submodule 引用本仓库。
+
 ## 包含三个插件
 
 **`interconnect`** —— host 服务（`ctx.interconnect`）：
