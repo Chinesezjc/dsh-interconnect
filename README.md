@@ -239,9 +239,27 @@ dsh plugin --profile <name> add file:/path/to/dsh-interconnect
 
 registry 上的 tarball 自带 `lib/*.js` 与 `lib/types/**/*.d.ts`，安装时不跑构建。
 
-`dsh plugin add` 会把仓库识别为 bundle 并追加进 profile 的 `dsh.profile.bundles`。重启
-web 服务使 host 侧生效。两端实例的 `.credentials.yaml`（或等价凭据源）设置相同的
-`DSH_INTERCONNECT_TOKEN` 作为共享密钥。
+`dsh plugin add` 会把仓库识别为 bundle 并追加进 profile 的 `dsh.profile.bundles`。这次改动
+落在**组合层**：`@deepseek-ai/dsh-base` 插入的 `hmr` 行监听 profile 的 `package.json`，
+manifest 一变就重读 `dsh.profile.bundles` 并重算 patch 层，所以新增的行会在几秒内插进
+运行中的树并激活，**不需要重启**。已实测：安装前 `GET /interconnect/link` 返回 404，安装后
+6 秒内同一请求返回 403（插件 fail-closed 的应答）。
+
+插件**代码**的更新属于另一层，必须重启该实例：hmr 的模块监听根在 base 里是空的
+（`root: []`）且跳过 `node_modules`，已经导入的模块不会重载。升级已装插件、或在 `file:`
+安装下重建 `lib/`，都落在这一类。没有 `profileContext` 的启动方式（`hmr` 行被禁用）也只能靠
+重启。
+
+两端实例用相同的 `DSH_INTERCONNECT_TOKEN` 作为共享密钥，任选一种来源：继承的进程环境变量、
+`$DSH_HOME/.env`、或 `$DSH_HOME/.credentials.yaml` 的 `refs` 段（该 provider 由
+`@deepseek-ai/dsh-base` 挂载；优先级为 继承的环境 > credentials 文档 > 调用目录的 `.env` >
+`$DSH_HOME/.env`）：
+
+```yaml
+version: 1
+refs:
+  DSH_INTERCONNECT_TOKEN: <两端相同的共享密钥>
+```
 
 ## 开发
 
