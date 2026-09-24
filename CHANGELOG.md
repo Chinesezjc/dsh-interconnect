@@ -2,6 +2,35 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.11.24（2026-09-24）
+
+投递给接收方 session 的消息 source 仍是 session v4 拒绝的旧包装，跨实例交接在进入会话时被拒。
+
+### 变更
+
+- **通知 source 改为生产者自有 kind**：`createUserMessage` 的 source 原先写
+  `{ kind: 'plugin', plugin: 'dsh-interconnect', … }`。session format v4 在消息准入处拒绝
+  `kind: 'plugin'`（`packages/session/session-format-v3-to-v4/src/message-sources.ts`，由
+  `assertV4RowAdmission` 调用），所以 handoff 不是被投递，而是抛
+  `format v4 message requires a producer-owned source kind`。现在写
+  `{ kind: 'plugin:dsh-interconnect', form: 'notice', summary: … }`——与 harness 的 v3→v4
+  迁移对本插件已持久化 handoff 写入的形态一致，迁移过的行与新投递的行归到同一个生产者。
+- **kind 在 `MessageSourceMap` 上声明**：在插件自己的模块里做声明合并，与其他生产者同一套做法；
+  不再依赖 wrapper 的 `plugin` 字符串字段。
+- **`form`/`summary` 不变**：summary 仍按有无 sender 两种取值构造，接收方的 context 呈现不变。
+
+### 验证
+
+- `pnpm run check`（typecheck + 170/170 tests + build）全绿。
+- `tests/interconnect.host.spec.ts` 新增断言：投递消息的 source 为 `plugin:dsh-interconnect`、
+  `form` 为 `notice`，且不再有 `plugin` 字段；把 kind 改回 `'plugin'` 时该断言变红（负例已跑）。
+- 真实准入探测：对 `assertV4RowAdmission` 传入新 source 被接受，传入旧包装被拒并给出上述同一句错误。
+- 构建产物与改动前比对：**4 个变**（`lib/index.js` `08ce274bb37a5e34`→`b17dc3e723a515f0`、
+  `lib/interconnect/index.js` `417d233de9787746`→`65f509a8a86beb89`、
+  `lib/tool-interconnect/index.js` `e32c539fed784db6`→`d0ec128b129e303f`、
+  `lib/types/interconnect/index.d.ts` `14822c7e96ff6559`→`5746afe8a072dac0`）；
+  `lib/skill-interconnect/index.js`、`lib/types/interconnect/types.d.ts`、asset、`cordis.patch.yml` 不变。
+
 ## 0.11.23（2026-09-15）
 
 跟随 #3243 分支新 head（`f749a8c252`）：`linkUrl` 改用 `LINK_CHANNEL` 常量，不再重复字面量。

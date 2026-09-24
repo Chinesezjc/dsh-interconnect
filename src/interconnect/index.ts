@@ -22,6 +22,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 // that code is the only ownership signal a cold session carries.
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 // Loads the `RemoteErrorDetailsMap` augmentation that declares `session/agent-busy`,
 // the code the Host raises when a resume hits a subagent-owned session. Type-only:
@@ -108,7 +109,19 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-const PLUGIN_SOURCE = 'dsh-interconnect'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /**
+     * Attribution of a handoff this plugin delivered. Session format V4 refuses
+     * the retired `{ kind: 'plugin', plugin }` wrapper, so the producer kind
+     * stands alone: the name is exactly what the harness's V3-to-V4 migration
+     * writes for this plugin's already-persisted handoffs (`plugin:` plus the
+     * original plugin name), keeping migrated rows and rows written from now on
+     * under one producer identity.
+     */
+    'plugin:dsh-interconnect': { readonly kind: 'plugin:dsh-interconnect' } & ContextFormed
+  }
+}
 
 /** Maximum inbound link-frame size in bytes; larger frames are dropped as protocol violations. */
 const MAX_LINK_FRAME_BYTES = 1024 * 1024
@@ -1008,8 +1021,7 @@ export class InterconnectService extends Service {
     // model-facing content.
     const message = createUserMessage({
       source: {
-        kind: 'plugin',
-        plugin: PLUGIN_SOURCE,
+        kind: 'plugin:dsh-interconnect',
         form: 'notice',
         summary: boundContextSummary(
           sender === undefined

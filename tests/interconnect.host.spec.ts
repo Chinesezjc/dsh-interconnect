@@ -445,6 +445,13 @@ describe('interconnect over real WS links', () => {
       })
       expect(result.delivered).toBe(true)
       expect(receiver.deliveries.get('R-sess')).toEqual(['via link'])
+      // The handoff's durable source is producer-owned. Session format V4
+      // refuses the retired `{ kind: 'plugin', plugin }` wrapper, so a delivery
+      // carrying it fails admission instead of reaching the session.
+      const relayed = receiver.sources.get('R-sess')
+      expect(relayed).toHaveLength(1)
+      expect(relayed![0]).toMatchObject({ kind: 'plugin:dsh-interconnect', form: 'notice' })
+      expect(relayed![0]).not.toHaveProperty('plugin')
     } finally {
       await sender.dispose()
       await r.close()
@@ -2278,6 +2285,7 @@ describe('interconnect frame field defaults', () => {
     const receiver = await mounted('secret', new Set([SESSION_ID]), {}, 'followup', true, 'test-instance')
     const frames = await deliverInbound(receiver.service, { kind: 'send', sessionId: SESSION_ID, text: 'anonymous' })
     expect(receiver.deliveries.get(SESSION_ID)).toEqual(['anonymous'])
+    expect(receiver.sources.get(SESSION_ID)?.[0]).toMatchObject({ kind: 'plugin:dsh-interconnect' })
     expect(frames).toContainEqual({
       type: 'msg-result',
       reqId: 'w-1',
