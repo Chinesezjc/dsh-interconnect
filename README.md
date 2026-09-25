@@ -279,6 +279,17 @@ manifest 一变就重读 `dsh.profile.bundles` 并重算 patch 层，所以新�
 安装下重建 `lib/`，都落在这一类。没有 `profileContext` 的启动方式（`hmr` 行被禁用）也只能靠
 重启。
 
+`file:` 安装还有一个**文件粒度**的差异，来自 pnpm 用硬链接装本地目录依赖（实测所装副本的
+link 数：`lib/**` 为 2，其余为 1）：`lib/**` 是硬链接，仓库里重建后 profile 里那份跟着变，
+重启即可生效；`assets/`、`dsh.plugin.json`、`package.json`、`cordis.patch.yml` 是**安装时刻
+的副本**，改仓库不会传播。skill 正文来自 `assets/`，所以「只重建 + 重启」会得到新代码配旧
+skill 正文，profile 的 `package.json` 里还可能写着很久以前的版本号。要整体刷新就用重装：
+
+```bash
+dsh plugin --profile <name> remove dsh-interconnect
+dsh plugin --profile <name> add file:/path/to/dsh-interconnect
+```
+
 两端实例用相同的 `DSH_INTERCONNECT_TOKEN` 作为共享密钥，任选一种来源：继承的进程环境变量、
 `$DSH_HOME/.env`、或 `$DSH_HOME/.credentials.yaml` 的 `refs` 段（该 provider 由
 `@deepseek-ai/dsh-base` 挂载；优先级为 继承的环境 > credentials 文档 > 调用目录的 `.env` >
