@@ -7,6 +7,8 @@
 ## 一、跟随上游 head 核对
 
 > **⚠️ 已作废（2026-09-16）**：上游分支 `feat/merge-dsh-interconnect` 随 #3243 关闭而不再前进。本节流程与 `scripts/check-upstream-alignment.mjs`、`scripts/port-upstream-change.mjs` 保留仅作历史工具——对齐门禁要比较的 ref 已冻结，不会再产生新结论。
+>
+> **2026-09-25 起本仓开始与上游分叉**（0.12.0 新增 `interconnect_peers`、失败原因 `peer-not-configured`，并改写安装/寻址段与 skill 正文）。此后对齐门禁**必然判红**，报的是分叉本身而不是漂移；不要再按它的输出回补上游，也不要用它判断某一版是否发布。它仍然可用的场景只有一个：核对某个旧 commit 是否与冻结 ref 逐字一致。
 
 上游是私有仓 `deepseek-harness/deepseek-harness` 的 `feat/merge-dsh-interconnect` 分支（合并后为 master）。核对用本仓的脚本，它先比**代码骨架**、再比**原始文本（注释计入）**：
 

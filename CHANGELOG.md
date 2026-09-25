@@ -2,6 +2,46 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.12.0（2026-09-25）
+
+新增对端枚举工具，并把「本机没配这个对端」从 `unreachable` 里拆出来。原先 peer id 写错只会得到
+「重试可能成功」的建议，而这一类重试永远不会成功。
+
+### 变更
+
+- **新增失败原因 `peer-not-configured`**：`msgRequest` 原先对「本机没有该 `instanceId` 的路由」与
+  「路由存在但链路断」返回同一个 `undefined`，两者都被归一成 `unreachable`。现在未配置的路由直接
+  返回该原因，`unreachable` 只表示已配置但对端没答复。该原因由本机产生、不上线缆：
+  `msgResultSchema` 不接受它（负例：带该原因的 `msg-result` 帧被判为畸形帧丢弃）。
+- **新增 `InterconnectService.peers()`**：按配置顺序返回每个对端的 `instanceId`、拨号 origin 与链路
+  状态（`up`/`down`），作为上述两支的判据来源。
+- **新增 `interconnect_peers` 工具**：模型在不知道 peer id 时可自查已配置的对端；列表为空时直接给出
+  补 `peers` 映射这一修法。
+- **`interconnect_ping` / `interconnect_list` 增加 `configured` 字段**：未答复时区分「本机没配」与
+  「配了但没答复」，两种文案各给下一步，不再统一建议重试。
+- **`interconnect_send` / `interconnect_reply` 增加该原因的失败文案**：指出这是配置缺口而非传输故障。
+- **文档**：README 增加「两台机器最小可用」（两端安装、共享密钥、隧道命令、两端 peer 配置、按序验证
+  与失败回查）；补齐失败原因表里缺的 `message-too-large`；改正「改 `peers` 必须重启」的旧说法
+  （实测：patch 层改动会重建 fiber 并按新映射建链）；skill 正文同步新增工具与原因。
+- **线缆协议不变**：没有增删任何帧字段，与旧版本对端互通。
+
+### 验证
+
+- `pnpm run check`（typecheck + 179/179 tests + build）全绿。新增 9 条用例：`peers()` 的空表、从未
+  打通、打通后再断三种状态；`peer-not-configured` 的发送、回复与渲染分支；「本机产生的原因不得从
+  线缆上来」的负例。
+- 配置热生效双向对照（隔离 profile，运行中只改 patch 层）：加入 `peers` 后出现拨号、删掉后拨号消失、
+  改 `instanceId` 后新链接自报新名字；同一实例上改插件代码不生效，重启后才生效。
+- 构建产物与 0.11.24 比对：**7 个变**（`lib/index.js` `b17dc3e723a515f0`→`26ca420262dd3996`、
+  `lib/interconnect/index.js` `65f509a8a86beb89`→`e9c4f9326aedac27`、
+  `lib/tool-interconnect/index.js` `d0ec128b129e303f`→`a77dd91dc1fe612a`、
+  `lib/types/interconnect/index.d.ts` `5746afe8a072dac0`→`d787ab1bbf38f389`、
+  `lib/types/interconnect/types.d.ts` `33956ef458ccb9a8`→`e8d115c866d70f3e`、
+  `assets/dsh-interconnect.md` `9ac2257814a68a23`→`08fc5d67a300f8e0`、
+  `dsh.plugin.json` `abfac2cc5f7b1b51`→`b1f9d44bf3c427b4`）；`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）与 `cordis.patch.yml`（`b324e2a6f00f7515`）逐字节不变。
+  根 `lib/types/index.d.ts` 在 0.11.24 未记基线，本版记录为 `9d09b35982688a05`。
+
 ## 0.11.24（2026-09-24）
 
 投递给接收方 session 的消息 source 仍是 session v4 拒绝的旧包装，跨实例交接在进入会话时被拒。

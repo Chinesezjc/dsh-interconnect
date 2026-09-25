@@ -11,12 +11,14 @@
 
 - 全走持久 WebSocket 链接：跨实例、跨机器投递消息、枚举 live session、探测活性（`send`/`reply`/`ping`/`list` 经 `/interconnect/link` 的 `msg`/`query` 帧）
 - `/interconnect/link` WebSocket 端点：双向实时事件推流，含心跳与指数退避重连；也承载
-  `send`/`reply` 消息（`msg`/`msg-result` 帧，WS 优先 + HTTP 回退）
-- 事件 fan-out（HTTP + WebSocket），入站事件以 `interconnect/event` 发出
+  `send`/`reply` 消息（`msg`/`msg-result` 帧）。0.9 起没有 HTTP 端点，也没有 HTTP 回退
+- 事件 fan-out 只在 WebSocket 链路上；入站事件以 `interconnect/event` 发出
 - 共享密钥鉴权（`DSH_INTERCONNECT_TOKEN`，bearer，fail-closed，timing-safe 比较）
 
 **`tool-interconnect`** —— 模型可见工具：
 
+- `interconnect_peers`：列出本实例**已配置**的对端及其拨号链路状态（`up`/`down`），用于在不知道
+  peer id 时先看有哪些可用目标，也是区分「没配这个 peer」与「配了但链路不通」的唯一入口
 - `interconnect_send`：向对端实例的指定 session 投递消息；可选 `delivery` 选投递模式、`resume` 唤醒离线 session
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
@@ -24,7 +26,7 @@
 
 **`skill-interconnect`** —— 配套 skill：
 
-- 向模型注册 `dsh-interconnect` skill，说明 `list`/`ping`/`send`/`reply` 的完整用法、
+- 向模型注册 `dsh-interconnect` skill，说明 `peers`/`list`/`ping`/`send`/`reply` 的完整用法、
   投递模式、`resume` 唤醒语义与失败处理。
 - 明确告知模型：`interconnect_send` 会自动注入发送方的 `instanceId` 和 `sessionId`，
   接收方凭记录的 sender 即可用 `interconnect_reply` 回信，不需要手工传地址。
@@ -39,9 +41,31 @@
 - `interconnect_send(instanceId="peer", sessionId=..., text=...)`
 - `interconnect_ping(instanceId="peer")`
 - `interconnect_list(instanceId="peer")`
+- `interconnect_peers()`（不接受参数；返回本实例配置的全部对端及其链路状态）
 - `interconnect_reply(text=...)`（只需文本；回信 session 是本 agent 自己的，目标从记录的 sender 解析）
 
-`instanceId` 是 `interconnect` 行 `peers` 映射里的键；真正用来拨号的 origin 由该映射的值给出（例如隧道端点 `http://127.0.0.1:13080`），**instanceId 本身从不出现在线上**，也不参与路由——origin 才是唯一的拨号依据。到**未配置 / 未联通**的对端 `send`/`ping`/`list` 返回 `unreachable`（无 HTTP 回退）。
+`instanceId` 是 `interconnect` 行 `peers` 映射里的键；真正用来拨号的 origin 由该映射的值给出（例如隧道端点 `http://127.0.0.1:13080`），**instanceId 本身从不出现在线上**，也不参与路由——origin 才是唯一的拨号依据。
+
+对端没配在这里时，`send`/`reply` 返回 `peer-not-configured`，`ping`/`list` 则在返回
+`reachable: false` 的同时带上 `configured: false`——这一支**重试永远不会成功**，只能去补
+`peers` 映射。配了但链路不通是另一支：链路断或两端 token 不一致时返回 `unreachable`
+（`configured: true`），重连成功后就可能通（无 HTTP 回退）。
+
+`interconnect_peers` 就是这两支的判据来源，输出每行一个对端：
+
+```
+peer-a  http://127.0.0.1:13080  [up]
+peer-b  http://127.0.0.1:13081  [down]
+```
+
+`up`/`down` 是**拨号链路**当前是否可用；`down` 不代表对端没开——重连按指数退避自己跑，改完
+网络或对端重启后无需重启本实例，链路会自己回来。
+
+增删或改点 `peers` 同样不需要重启：profile patch 层的改动会重建本插件的 fiber，构造器按新映射
+重新建链。这条已实测（双向对照）：patch 层加入 `peers` 后出现拨号、删掉后拨号消失；改
+`instanceId` 后新链接自报的就是新名字。生效的前提是这一层被真正应用——由 `dsh` 启动、组合里带
+`hmr` 行的实例会自己应用（见「安装」一节），其它启动方式只能重启。构造器只在激活时读一次该
+映射，所以改了文件但没被应用时，行为仍是旧的。
 
 `interconnect_list` 返回对端**当前 live** 的 session，每一行的 `sessionId` 在调用时刻都是合法的投递目标：
 
@@ -118,13 +142,18 @@ interconnect_reply(text="reply")
 | `reason` | 含义 | 应对 |
 |---|---|---|
 | `session-not-live` | 对端**答复了**，但那个 session 没有运行中的 agent | 重试同一个 id 无用；用 `interconnect_list` 换目标，或带 `resume` |
-| `unreachable` | 没拿到可用答复（传输失败，或鉴权被拒） | 目标 session 可能完好，重试可能成功 |
+| `unreachable` | 配了该对端，但没拿到可用答复（链路断，或鉴权被拒） | 目标 session 可能完好，链路重连后重试可能成功 |
+| `peer-not-configured` | 本实例的 `peers` 里没有这个 `instanceId`，链路根本不存在 | 重试永远不会成功；补 `peers` 映射（patch 层改完即生效，见「寻址」一节），或改用 `interconnect_peers` 列出的 id |
 | `resume-refused` | 请求了唤醒，但对端不允许（`allowResume: false`） | 再带 `resume` 也没用 |
 | `resume-failed` | 允许唤醒且尝试了，但没得到 live agent（无此持久化 session，或被别的 owner 持有） | 换目标 |
 | `session-owned-by-subagent` | 该 session 属于 subagent 路由，投递权在它的父 agent | 通过父 agent 触达，别直接投 |
+| `message-too-large` | 编好的帧超过链路帧上限（1 MiB），什么都没写、链路也没断 | 缩短文本，重发原文没用 |
 | `no-sender-known` | `reply` 指向的本地 session 从未记录过发送方（它没收到过带 `sender` 的消息，或对端版本过旧没带 `sender`） | 先用 `interconnect_send` 主动建立联系 |
 
 `reason` 恰好在 `delivered` 为 false 时出现。
+
+后两种加上 `peer-not-configured` 是**本机产生**的原因，不会从线缆上来：`msgResultSchema` 只接受
+接收方能回答的原因，所以这三条只可能出自本实例自己的服务（对端无法借它们伪造一个本地判定）。
 
 只有真的「尝试唤醒但失败」才是 `resume-failed`。没装 api-proxy 的部署里，`agent` lookup
 退化成一次 registry 查询、根本没有唤醒能力，这时报 `session-not-live`——否则会让调用方去重试
@@ -205,7 +234,7 @@ Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedEr
 |---|---|---|
 | `instanceId` | `'dsh'` | 本实例自报的 id，出现在 `ping`/`send`/`list` 的回包里。也作为「对端如何寻址到我」的身份 |
 | `requestTimeoutMs` | `10000` | 出站请求超时，上限 60000 |
-| `peers` | `{}` | **对端路由映射**：`{ [对端 instanceId]: 我拨向它的 origin }`，例如隧道端点 `http://127.0.0.1:13080`。激活时对每个对端自动建持久 WS 链；`send`/`reply`/`ping`/`list` 都按 instanceId 走对应链接 |
+| `peers` | `{}` | **对端路由映射**：`{ [对端 instanceId]: 我拨向它的 origin }`，例如隧道端点 `http://127.0.0.1:13080`。激活时对每个对端自动建持久 WS 链；`send`/`reply`/`ping`/`list` 都按 instanceId 走对应链接。改这一行不需要重启：profile patch 层的改动会重建 fiber 并按新映射建链 |
 | `delivery` | `'followup'` | 入站消息未带 `delivery` 时的默认投递模式 |
 | `allowResume` | `true` | 是否允许发送方用 `resume` 唤醒本机的离线 session |
 
@@ -261,6 +290,75 @@ refs:
   DSH_INTERCONNECT_TOKEN: <两端相同的共享密钥>
 ```
 
+## 两台机器最小可用
+
+下面用 A、B 两台机器说明最短路径：A 要主动发消息给 B，B 也要能回信。五步里前四步两端都要做，
+漏掉哪一步就会停在对应的失败原因上。
+
+### 1. 两端各装一次
+
+```bash
+dsh plugin --profile <name> add dsh-interconnect
+```
+
+由 `dsh` 启动的实例几秒内自己热加载（见上一节），不用重启。
+
+### 2. 两端设同一个共享密钥
+
+按上一节任选一种来源，两侧的值必须逐字节相同。任一端没配 token 时端点 fail-closed，直接 403，
+另一侧只会看到链路 `down`。
+
+### 3. 打通网络：把 B 的端口映射到 A 的本机端口
+
+链接路由 `/interconnect/link` 挂在 B 的**宿主 webserver** 上，也就是 B 那个 DSH 实例监听的端口
+（`dsh web` 就是 GUI 的端口）。同一台机器上就是回环地址；跨机器时先建立隧道：
+
+```bash
+# 在 A 上执行：B 的 3080 变成 A 本机的 13080；-N 不执行远程命令
+ssh -N -L 13080:127.0.0.1:3080 <B 的用户@主机>
+```
+
+只用 A→B 单向发消息时，这一条就够了。要让 B 也能主动发给 A，在 B 上反向再建一条（把 A 的端口
+映射成 B 本机的 13081）。
+
+### 4. 两端各配一遍 peer
+
+改 profile 的 patch 层（不是插件包内的文件；`interconnect` 行由 bundle 插入，这里按键名覆盖它的
+config）：
+
+```yaml
+# A: $DSH_HOME/profiles/<name>/cordis.patch.yml
+- id: interconnect
+  config:
+    instanceId: a
+    peers:
+      b: http://127.0.0.1:13080   # key = B 自报的 instanceId；value = A 拨向 B 的 origin
+```
+
+```yaml
+# B: $DSH_HOME/profiles/<name>/cordis.patch.yml
+- id: interconnect
+  config:
+    instanceId: b
+    peers:
+      a: http://127.0.0.1:13081   # 没有这一条，B 能收消息但回信会得到 peer-not-configured
+```
+
+改完不用重启：patch 层的改动会重建 fiber 并按新映射建链。key 建议与对端自报的 `instanceId`
+一致，否则 B 拨入的那条链路在 A 侧认不出是同一个 peer，事件会重复一份（服务会 warn 一次）。
+
+### 5. 按顺序验证
+
+1. `interconnect_peers` —— 应看到 `b` 且链路 `up`。
+2. `interconnect_ping(instanceId="b")` —— 应答里是 B 的实例 id。
+3. `interconnect_list(instanceId="b")` —— 列出 B 上 live 的 session。
+4. `interconnect_send(instanceId="b", sessionId=..., text=...)` —— 投递成功。
+5. B 侧 `interconnect_reply(text=...)` 回信，A 侧收到续文。
+
+停在哪一步就回查哪一步：`unreachable`（`configured: true`）回查第 2、3 步（token、隧道）；
+`configured: false` / `peer-not-configured` 回查第 4 步（映射里没有这个 key）；链路一直 `down` 时，
+对端日志里对应的是 401/403，回查第 2 步（两侧 token 是否都有值且逐字节相同）。
+
 ## 开发
 
 依赖 [公开的 DeepSeek Harness monorepo](https://github.com/deepseek-ai/deepseek-harness)
@@ -288,7 +386,7 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 164/164 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示等回归用例）；
+- 179/179 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、本机原因不得从线缆上来的负例等回归用例）；
   类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
