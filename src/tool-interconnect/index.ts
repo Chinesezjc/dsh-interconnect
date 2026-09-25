@@ -13,9 +13,10 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-// The row bound comes from the service that answers `interconnect_list`; the import also
-// activates the `Context.interconnect` merge that service declares.
-import { MAX_LISTED_SESSIONS } from '../interconnect/index.ts'
+// The row bound comes from the service that answers `interconnect_list`, and the
+// service type names the peer-status rows `interconnect_peers` reports; the import
+// also activates the `Context.interconnect` merge that service declares.
+import { MAX_LISTED_SESSIONS, type InterconnectService } from '../interconnect/index.ts'
 
 /** Cordis plugin name. */
 export const name = 'tool-interconnect'
@@ -67,7 +68,27 @@ const deliveryOutcome = (result: {
 })
 
 /**
- * Register the four tool surfaces. Registration is idempotent per fiber; the
+ * Whether this instance configures a route for one peer id. `ping` and `list`
+ * report the same `undefined` for "no such peer here" and "configured but
+ * silent", so the tool asks this to tell the caller which one it hit.
+ */
+const configures = (interconnect: InterconnectService, instanceId: string): boolean =>
+  interconnect.peers().some(peer => peer.instanceId === instanceId)
+
+/**
+ * Text for an unanswered `ping`/`list`: an id this instance does not configure
+ * cannot be retried into working, so that case names the fix instead of
+ * suggesting a retry.
+ */
+const unansweredText = (instanceId: string, configured: boolean | undefined): string =>
+  configured === false
+    ? `not configured: this instance has no peer "${instanceId}" — add it to the interconnect peers mapping`
+      + ' (interconnect_peers lists what is configured)'
+    : `unreachable: peer "${instanceId}" gave no usable answer (its link is down, or the shared token differs);`
+      + ' retrying may succeed'
+
+/**
+ * Register the five tool surfaces. Registration is idempotent per fiber; the
  * tools unregister with the owning fiber.
  * @param ctx - connection context carrying the interconnect service and the tool registry.
  */
@@ -134,6 +155,9 @@ export function apply(ctx: Context): void {
         // outcome rather than a liveness claim.
         const text = ((): string => {
           switch (value.reason) {
+            case 'peer-not-configured':
+              return `not delivered: this instance configures no peer "${value.instance}"`
+                + ' — add it to the interconnect peers mapping (interconnect_peers lists what is configured)'
             case 'unreachable':
               return `not delivered: ${value.instance} did not answer (unreachable); retrying may succeed`
             case 'resume-refused':
@@ -197,18 +221,21 @@ export function apply(ctx: Context): void {
         properties: {
           reachable: { type: 'boolean', required: true },
           instance: { type: 'string' },
+          // Whether this instance configures that peer at all: absent/false means
+          // the id cannot be reached by any retry, true means the link is down.
+          configured: { type: 'boolean' },
         },
       },
-      render: (_args, value) => [{
+      render: (args, value) => [{
         type: 'text',
         text: value.reachable
           ? `reachable: ${value.instance ?? '(unknown instance)'}`
-          : 'unreachable',
+          : unansweredText(args.instanceId, value.configured),
       }],
     },
     async execute(args, exec) {
       const result = await raceSignal(exec.signal, interconnect.ping(args.instanceId))
-      if (result === undefined) return { reachable: false }
+      if (result === undefined) return { reachable: false, configured: configures(interconnect, args.instanceId) }
       return { reachable: true, instance: result.instance }
     },
   }))
@@ -235,6 +262,8 @@ export function apply(ctx: Context): void {
         properties: {
           reachable: { type: 'boolean', required: true },
           instance: { type: 'string' },
+          // Whether this instance configures that peer at all, as in interconnect_ping.
+          configured: { type: 'boolean' },
           sessions: {
             type: 'array',
             items: {
@@ -249,8 +278,8 @@ export function apply(ctx: Context): void {
           },
         },
       },
-      render: (_args, value) => {
-        if (!value.reachable) return [{ type: 'text', text: 'unreachable' }]
+      render: (args, value) => {
+        if (!value.reachable) return [{ type: 'text', text: unansweredText(args.instanceId, value.configured) }]
         const sessions = value.sessions ?? []
         if (sessions.length === 0) {
           return [{ type: 'text', text: `no live sessions on ${value.instance ?? '(unknown instance)'}` }]
@@ -270,7 +299,7 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       const result = await raceSignal(exec.signal, interconnect.list(args.instanceId))
-      if (result === undefined) return { reachable: false }
+      if (result === undefined) return { reachable: false, configured: configures(interconnect, args.instanceId) }
       return {
         reachable: true,
         instance: result.instance,
@@ -282,6 +311,66 @@ export function apply(ctx: Context): void {
           ...(session.status === undefined ? {} : { status: session.status }),
         })),
       }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'interconnect_peers',
+    description: 'List the peer DSH instances this instance is configured to reach, with each peer\'s '
+      + 'dialed link state. Call this first when you do not already know the peer ids available here: '
+      + 'every listed instanceId is a valid target for interconnect_send, interconnect_ping, and '
+      + 'interconnect_list. A peer listed with link "down" is configured but currently cannot carry '
+      + 'frames, so it answers nothing until its reconnect succeeds; an id that is not listed at all '
+      + 'cannot be reached and reports reason "peer-not-configured". A message that arrives from a peer '
+      + 'this instance does not configure can be received but not replied to.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          peers: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                instanceId: { type: 'string', required: true },
+                origin: { type: 'string', required: true },
+                link: { type: 'string', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const peers = value.peers ?? []
+        if (peers.length === 0) {
+          return [{
+            type: 'text',
+            text: 'no peers configured: this instance can receive messages but cannot send or reply.'
+              + ' Add entries to the interconnect row\'s peers mapping (a peer id keyed to the origin this'
+              + ' instance dials); the change applies when that row\'s config is re-activated.',
+          }]
+        }
+        return [{
+          type: 'text',
+          text: peers.map(peer => `${peer.instanceId}  ${peer.origin}  [${peer.link}]`).join('\n'),
+        }]
+      },
+    },
+    execute(_args, _exec) {
+      // A local read of the configured routes: nothing is dialed or awaited, so
+      // this needs no cancellation race.
+      return Promise.resolve({
+        peers: interconnect.peers().map(peer => ({
+          instanceId: peer.instanceId,
+          // The origin is this instance's own dial target, read locally: it is
+          // what a caller needs to diagnose a peer whose link will not come up.
+          origin: peer.origin,
+          link: peer.link,
+        })),
+      })
     },
   }))
 
@@ -332,6 +421,11 @@ export function apply(ctx: Context): void {
           }
           if (value.reason === 'session-owned-by-subagent') {
             return 'not delivered: the recorded sender\'s session belongs to a subagent and its parent agent owns delivery'
+          }
+          if (value.reason === 'peer-not-configured') {
+            return `not delivered: this instance configures no peer "${value.instance}"`
+              + ' — the sender can be messaged, but this instance cannot dial it back until it is added'
+              + ' to the interconnect peers mapping'
           }
           if (value.reason === 'unreachable') {
             return 'not delivered: the recorded sender did not answer (unreachable); retrying may succeed'

@@ -91,19 +91,27 @@ export interface SendPayload {
  * - `message-too-large` — over a writable link, the encoded frame for this
  *   message exceeds the link's frame cap (1 MiB), so nothing was written and the
  *   peer link stayed up. Retrying the same text cannot succeed; it has to be
- *   shortened. A message to a peer with no writable link reports `unreachable`
- *   first, because the link check precedes this one.
+ *   shortened. A message that fails the earlier route checks reports
+ *   `peer-not-configured` or `unreachable` instead, because those precede this
+ *   one.
+ * - `peer-not-configured` — this instance configures no route for that
+ *   `instanceId`, so no link to it exists and none can be dialed. Retrying can
+ *   never succeed; the peer has to be added to {@link Config.peers}, which
+ *   applies when the service is re-activated (the `dsh` launcher's HMR row does
+ *   that on its own). {@link PeerStatus} rows show which ids this instance does
+ *   configure.
  * - `no-sender-known` — a `reply` was addressed to a local session that never
  *   recorded a sender, either because that session did not receive a message
  *   through this service or the incoming message carried no `sender` identity
  *   (an older peer omitted it). A caller with no executing session reports it
  *   too: there is no local session whose sender could be recalled.
  *
- * `message-too-large` and `no-sender-known` are produced locally and never cross
- * the wire: `msgResultSchema` admits only the reasons a receiver can answer with,
- * so a caller sees them only from this instance's own service.
+ * `message-too-large`, `peer-not-configured`, and `no-sender-known` are produced
+ * locally and never cross the wire: `msgResultSchema` admits only the reasons a
+ * receiver can answer with, so a caller sees them only from this instance's own
+ * service.
  */
-export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent' | 'message-too-large' | 'no-sender-known'
+export type SendFailure = 'session-not-live' | 'unreachable' | 'resume-refused' | 'resume-failed' | 'session-owned-by-subagent' | 'message-too-large' | 'peer-not-configured' | 'no-sender-known'
 
 /**
  * Business result of a `send` endpoint call: either the target session was
@@ -276,6 +284,25 @@ export type LinkMessage = {
   readonly resume?: boolean
 }
 
+/** Whether a configured peer's dialed link currently carries frames. */
+export type PeerLinkState = 'up' | 'down'
+
+/**
+ * One configured peer route and its current link state. This is a local
+ * diagnostic shape: it never crosses the wire and exists so a caller can tell
+ * "this instance does not configure that peer" (`peer-not-configured`) apart
+ * from "the peer is configured but answered nothing" (`unreachable`), which a
+ * bare `undefined` from `ping`/`list` cannot express.
+ */
+export interface PeerStatus {
+  /** The peer's `instanceId` as configured under {@link Config.peers}: a valid target for send/ping/list. */
+  readonly instanceId: string
+  /** The origin this instance dials for that peer, as configured. */
+  readonly origin: string
+  /** Whether that dialed link is open right now; a closed one re-dials on its own backoff. */
+  readonly link: PeerLinkState
+}
+
 /** Service config bound by the Composition loader. */
 export interface Config {
   /**
@@ -306,9 +333,13 @@ export interface Config {
    * open dialed link for the id that socket announced. A peer listed under a
    * key other than the id it announces is therefore not recognised as the same
    * peer and receives each event twice; the service warns about that once per
-   * link. This map is the whole route surface: only the constructor reads it,
-   * so a peer link is added, removed, or re-pointed by restarting with
-   * different values.
+   * link. This map is the whole route surface: only the constructor reads it, so
+   * a changed map takes effect when the service is re-activated. Under the
+   * `dsh` launcher that happens on its own — the profile HMR row reconciles this
+   * row's config and rebuilds its fiber, which re-links the map (measured live:
+   * adding a peer starts the dial, removing it stops the dial, and a changed
+   * `instanceId` is announced by the next link). Without that row, changing the
+   * map means restarting the instance.
    */
   readonly peers?: Record<string, string>
   /**

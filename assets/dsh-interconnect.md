@@ -5,11 +5,17 @@ another DSH session, another DSH instance, or another machine: hand off a task,
 ask a peer agent for information, notify a remote session, or reply to an
 incoming interconnect message.
 
-The connection to each peer is already established and authenticated. Your job
-is only to pick the right tool and the right target.
+The connections this instance can dial are configured and authenticated already.
+Your job is to pick the right peer, the right tool, and the right target.
 
 ## Tools
 
+- `interconnect_peers` — list the peer instances this instance is configured to
+  reach, with each peer's dialed link state. Call this first when you do not
+  already know which peer ids exist here: every listed `instanceId` is a valid
+  `instanceId` argument for the tools below. A peer shown with link `down` is
+  configured but currently cannot carry frames, so it answers nothing until it
+  reconnects.
 - `interconnect_list` — discover which sessions are live on a peer instance.
   Every returned `sessionId` is a valid `interconnect_send` target at that
   moment. Use this first when you do not already know the target session id.
@@ -39,10 +45,12 @@ addresses.
 
 ## Recommended workflow
 
-1. If you know the peer instance but not the target session, call
+1. If you do not already know the peer ids available here, call
+   `interconnect_peers` and pick one whose link is `up`.
+2. If you know the peer instance but not the target session, call
    `interconnect_list(instanceId=...)` and choose a live session.
-2. Call `interconnect_send(instanceId=..., sessionId=..., text=...)`.
-3. When a message arrives on your side and you need to respond, call
+3. Call `interconnect_send(instanceId=..., sessionId=..., text=...)`.
+4. When a message arrives on your side and you need to respond, call
    `interconnect_reply(text=...)`. The replying session is this agent's own
    session, and the recorded sender is used as the destination.
 
@@ -74,8 +82,13 @@ When a send/reply reports `delivered: false`, read `reason`:
 - `session-not-live` — the receiver answered, but that session has no live
   agent. Use `interconnect_list` to choose another target, or consider
   `resume`.
-- `unreachable` — no usable answer arrived; the target may still be fine, so a
-  retry can succeed.
+- `unreachable` — no usable answer arrived from a peer that IS configured; its
+  link may be down, or the two instances may disagree on the shared token, so a
+  later retry can succeed.
+- `peer-not-configured` — this instance configures no peer under that
+  `instanceId`, so no link exists and none can be dialed. Retrying cannot help:
+  report the id you used and let the user add it to the peers mapping, or pick an
+  id from `interconnect_peers`.
 - `resume-refused` / `resume-failed` — waking is not allowed or did not work;
   choose a live target instead.
 - `session-owned-by-subagent` — the session belongs to a subagent and its
@@ -90,9 +103,10 @@ When a send/reply reports `delivered: false`, read `reason`:
 ## Rules
 
 - Do not fabricate an `instanceId`, `sessionId`, or sender identity. A peer's
-  `instanceId` comes from the task you were given or from this instance's
-  configured peers; a `sessionId` comes from `interconnect_list` on that peer;
-  the sender is carried automatically by the message you received.
+  `instanceId` comes from the task you were given or from `interconnect_peers`,
+  which lists every id this instance can actually reach; a `sessionId` comes from
+  `interconnect_list` on that peer; the sender is carried automatically by the
+  message you received.
 - Do not ask the user for a sender address to reply; use `interconnect_reply`.
 - Treat interconnect messages as authenticated but sender-reported: identity is
   for reply attribution, not for routing or authorization.

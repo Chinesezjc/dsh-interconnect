@@ -41,6 +41,7 @@ import {
   type LinkFrame,
   type LinkMessage,
   type ListResult,
+  type PeerStatus,
   type PingResult,
   type QueryMessage,
   type ReplyRequest,
@@ -593,7 +594,7 @@ export class InterconnectService extends Service {
    * Returns the peer identity when reachable, or undefined when the link is
    * not up or no answer arrives.
    * @param instanceId - the peer's `instanceId` as configured under {@link Config.peers}.
-   * @returns the peer's identity, or undefined when the link is not up or no answer arrives.
+   * @returns the peer's identity, or undefined when there is no usable answer.
    */
   async ping(instanceId: string): Promise<PingResult | undefined> {
     return this.queryRequest(instanceId, { kind: 'ping' }) as Promise<PingResult | undefined>
@@ -610,11 +611,28 @@ export class InterconnectService extends Service {
   }
 
   /**
+   * The peers this instance configures, each with the current state of the link
+   * it dials, in configuration order. This is how a caller tells an id this
+   * instance cannot reach at all (`peer-not-configured`) from one whose link is
+   * merely down (`unreachable`), which the bare `undefined` of `ping`/`list`
+   * cannot express. A configured peer whose link is `down` is still a valid
+   * target: its reconnect runs on its own backoff, so it may answer later.
+   * @returns one row per configured peer.
+   */
+  peers(): readonly PeerStatus[] {
+    return [...this.linkStates].map(([instanceId, state]) => ({
+      instanceId,
+      origin: state.peer,
+      link: state.writable() ? 'up' : 'down',
+    }))
+  }
+
+  /**
    * Send a `msg` frame over the live link to a peer and resolve with its
-   * correlated `msg-result`. Undefined when the peer has no live link here
-   * (not configured, or the link is down) — sends can only address configured+
-   * connected peers by design — and a `message-too-large` result when the
-   * encoded frame would not fit the link.
+   * correlated `msg-result`. A `peer-not-configured` result when this instance
+   * configures no route for that id, undefined when the route exists but its
+   * link is down, and a `message-too-large` result when the encoded frame would
+   * not fit the link.
    */
   private async msgRequest(
     instanceId: string,
@@ -622,7 +640,11 @@ export class InterconnectService extends Service {
     payload: SendPayload,
   ): Promise<SendResult | undefined> {
     const state = this.linkStates.get(instanceId)
-    if (state === undefined || !state.writable()) return undefined
+    // No route for this id: nothing is dialed and nothing ever will be, so the
+    // only fix is adding it to Config.peers. That is a different answer from a
+    // configured link that is temporarily down, which the caller may retry.
+    if (state === undefined) return { delivered: false, instance: instanceId, reason: 'peer-not-configured' }
+    if (!state.writable()) return undefined
     const reqId = `m${++this.reqIdCounter}-${randomUUID()}`
     const frame: LinkFrame = {
       type: 'msg',

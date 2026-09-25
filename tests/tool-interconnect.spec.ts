@@ -21,6 +21,9 @@ function fakeInterconnect(overrides: Partial<InterconnectService> = {}): Interco
       ],
     })),
     reply: vi.fn(async () => ({ delivered: true, instance: 'peer' })),
+    // One configured peer, so a tool that distinguishes "not configured" from
+    // "configured but silent" has a stable answer unless a case overrides it.
+    peers: vi.fn(() => [{ instanceId: 'peer', origin: 'http://127.0.0.1:13080', link: 'up' as const }]),
     selfSender: vi.fn(() => ({ instanceId: 'self', sessionId: '' })),
     ...overrides,
   } as unknown as InterconnectService
@@ -51,7 +54,7 @@ describe('tool-interconnect', () => {
   })
 
   it('removes every registered tool when the contributing fiber is disposed', async () => {
-    const names = ['interconnect_list', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
+    const names = ['interconnect_list', 'interconnect_peers', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
     const { ctx, dispose } = await mounted(fakeInterconnect())
     expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(expect.arrayContaining(names))
     await dispose()
@@ -110,6 +113,22 @@ describe('tool-interconnect', () => {
     const reply = ctx.tools.get('interconnect_reply')!
     const replyText = (reply.output.render({ text: 'x' }, { delivered: false, instance: 'peer', reason: 'message-too-large' }) as { text: string }[])[0]!.text
     expect(replyText).toContain('too large')
+    await dispose()
+  })
+
+  it('renders an unconfigured peer as a configuration gap, not a transport failure', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const send = ctx.tools.get('interconnect_send')!
+    const sendArgs = { instanceId: 'typo-peer', sessionId: 'sess-x', text: 'x' }
+    const sendText = (send.output.render(sendArgs, { delivered: false, instance: 'typo-peer', reason: 'peer-not-configured' }) as { text: string }[])[0]!.text
+    expect(sendText).toContain('configures no peer')
+    expect(sendText).toContain('interconnect_peers')
+    // Adding the peer is the fix, so a retry must not be suggested.
+    expect(sendText).not.toContain('retrying may succeed')
+    const reply = ctx.tools.get('interconnect_reply')!
+    const replyText = (reply.output.render({ text: 'x' }, { delivered: false, instance: 'typo-peer', reason: 'peer-not-configured' }) as { text: string }[])[0]!.text
+    expect(replyText).toContain('configures no peer')
+    expect(replyText).not.toContain('retrying may succeed')
     await dispose()
   })
 
@@ -242,7 +261,28 @@ describe('tool-interconnect', () => {
       { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     )
-    expect(value).toEqual({ reachable: false })
+    // The peer is configured, so the answer is "silent", not "no such peer".
+    expect(value).toEqual({ reachable: false, configured: true })
+    await dispose()
+  })
+
+  it('reports an id this instance does not configure as unconfigured, not unreachable', async () => {
+    const interconnect = fakeInterconnect({
+      ping: vi.fn(async () => undefined),
+      peers: vi.fn(() => []),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_ping')!
+    const value = await tool.execute(
+      { instanceId: 'typo-peer' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(value).toEqual({ reachable: false, configured: false })
+    const rendered = tool.output.render({ instanceId: 'typo-peer' }, value as never)
+    const text = (rendered as { text: string }[])[0]!.text
+    expect(text).toContain('not configured')
+    // No retry can help, so the retry advice must not appear for this case.
+    expect(text).not.toContain('retrying may succeed')
     await dispose()
   })
 
@@ -304,7 +344,40 @@ describe('tool-interconnect', () => {
       { instanceId: 'peer' },
       { signal: new AbortController().signal } as never,
     )
-    expect(value).toEqual({ reachable: false })
+    expect(value).toEqual({ reachable: false, configured: true })
+    await dispose()
+  })
+
+  it('lists the configured peers with their link state', async () => {
+    const interconnect = fakeInterconnect({
+      peers: vi.fn(() => [
+        { instanceId: 'peer-a', origin: 'http://127.0.0.1:13080', link: 'up' as const },
+        { instanceId: 'peer-b', origin: 'http://127.0.0.1:13081', link: 'down' as const },
+      ]),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_peers')!
+    expect(tool.name).toBe('interconnect_peers')
+    const value = await tool.execute({}, { signal: new AbortController().signal } as never)
+    expect(value).toEqual({
+      peers: [
+        { instanceId: 'peer-a', origin: 'http://127.0.0.1:13080', link: 'up' },
+        { instanceId: 'peer-b', origin: 'http://127.0.0.1:13081', link: 'down' },
+      ],
+    })
+    const rendered = tool.output.render({}, value as never)
+    expect((rendered as { text: string }[])[0]!.text)
+      .toBe('peer-a  http://127.0.0.1:13080  [up]\npeer-b  http://127.0.0.1:13081  [down]')
+    await dispose()
+  })
+
+  it('renders an empty peer list as a configuration gap with its fix', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect({ peers: vi.fn(() => []) }))
+    const tool = ctx.tools.get('interconnect_peers')!
+    const rendered = tool.output.render({}, { peers: [] })
+    const text = (rendered as { text: string }[])[0]!.text
+    expect(text).toContain('no peers configured')
+    expect(text).toContain('peers mapping')
     await dispose()
   })
 
@@ -435,7 +508,7 @@ describe('tool-interconnect rendering', () => {
     await dispose()
   })
 
-  it('renders ping reachable and unreachable distinctly', async () => {
+  it('renders ping reachable and a silent configured peer distinctly', async () => {
     const { ctx, dispose } = await mounted(fakeInterconnect())
     const tool = ctx.tools.get('interconnect_ping')!
     const args = { instanceId: 'peer' }
@@ -443,8 +516,14 @@ describe('tool-interconnect rendering', () => {
     expect((reachable as { text: string }[])[0]!.text).toBe('reachable: peer')
     const unknown = tool.output.render(args, { reachable: true })
     expect((unknown as { text: string }[])[0]!.text).toBe('reachable: (unknown instance)')
-    const unreachable = tool.output.render(args, { reachable: false })
-    expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable')
+    const silent = tool.output.render(args, { reachable: false, configured: true })
+    const silentText = (silent as { text: string }[])[0]!.text
+    expect(silentText).toContain('gave no usable answer')
+    expect(silentText).toContain('retrying may succeed')
+    const unconfigured = tool.output.render(args, { reachable: false, configured: false })
+    const unconfiguredText = (unconfigured as { text: string }[])[0]!.text
+    expect(unconfiguredText).toContain('not configured')
+    expect(unconfiguredText).not.toContain('retrying may succeed')
     await dispose()
   })
 
@@ -468,8 +547,10 @@ describe('tool-interconnect rendering', () => {
     const { ctx, dispose } = await mounted(fakeInterconnect())
     const tool = ctx.tools.get('interconnect_list')!
     const args = { instanceId: 'peer' }
-    const unreachable = tool.output.render(args, { reachable: false })
-    expect((unreachable as { text: string }[])[0]!.text).toBe('unreachable')
+    const unconfigured = tool.output.render(args, { reachable: false, configured: false })
+    const unconfiguredText = (unconfigured as { text: string }[])[0]!.text
+    expect(unconfiguredText).toContain('not configured')
+    expect(unconfiguredText).not.toContain('retrying may succeed')
     const empty = tool.output.render(args, { reachable: true, instance: 'peer', sessions: [] })
     expect((empty as { text: string }[])[0]!.text).toBe('no live sessions on peer')
     const rows = tool.output.render(args, {
@@ -496,6 +577,11 @@ describe('tool-interconnect rendering', () => {
     expect((owned as { text: string }[])[0]!.text).toContain('parent agent owns delivery')
     const unreachable = tool.output.render(args, { delivered: false, instance: 'peer', reason: 'unreachable' })
     expect((unreachable as { text: string }[])[0]!.text).toContain('did not answer')
+    const unconfigured = tool.output.render(args, { delivered: false, instance: 'peer', reason: 'peer-not-configured' })
+    const unconfiguredText = (unconfigured as { text: string }[])[0]!.text
+    expect(unconfiguredText).toContain('configures no peer')
+    // Adding the peer is the fix, so a retry must not be suggested.
+    expect(unconfiguredText).not.toContain('retrying may succeed')
     const refused = tool.output.render(args, { delivered: false, instance: 'peer', reason: 'resume-refused' })
     expect((refused as { text: string }[])[0]!.text).toContain('does not allow waking')
     const failed = tool.output.render(args, { delivered: false, instance: 'peer', reason: 'resume-failed' })

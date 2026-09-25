@@ -459,15 +459,30 @@ describe('interconnect over real WS links', () => {
     }
   })
 
-  it('reports unreachable for a send to a peer with no live link (not configured/connected)', async () => {
+  it('reports peer-not-configured for a send to an id this instance does not configure', async () => {
     const sender = await mounted('secret', new Set([]))
-    // No peer route for 'missing' was configured, so no link exists here.
+    // No peer route for 'missing' was configured, so no link exists here, and no
+    // amount of retrying can create one.
     const result = await sender.ctx.interconnect.send({
       instanceId: 'missing',
       sessionId: 'X-sess',
       text: 'hello',
     })
-    expect(result).toMatchObject({ delivered: false, reason: 'unreachable' })
+    expect(result).toEqual({ delivered: false, instance: 'missing', reason: 'peer-not-configured' })
+    await sender.dispose()
+  })
+
+  it('reports unreachable for a configured peer whose link never opened', async () => {
+    // A configured route whose endpoint refuses every connection: the peer is in
+    // the routing table, so the answer is a transport failure, not the
+    // configuration gap `peer-not-configured` names.
+    const sender = await mounted('secret', new Set([]), { 'dead-peer': 'http://127.0.0.1:1' })
+    const result = await sender.ctx.interconnect.send({
+      instanceId: 'dead-peer',
+      sessionId: 'X-sess',
+      text: 'hello',
+    })
+    expect(result).toEqual({ delivered: false, instance: 'dead-peer', reason: 'unreachable' })
     await sender.dispose()
   })
 
@@ -2035,10 +2050,10 @@ describe('interconnect outbound reply timeouts', () => {
       text: 'hi',
       sender: { instanceId: 'inst-send', sessionId: 'send-sess' },
     })
-    // No peer link named 'inst-send' exists: msgRequest resolves undefined and
-    // reply reports unreachable without a timeout.
+    // No peer link named 'inst-send' exists: msgRequest reports the missing route
+    // itself, so reply answers peer-not-configured without a timeout.
     const result = await receiver.ctx.interconnect.reply({ sessionId: 'recv-sess', text: 'back' })
-    expect(result).toEqual({ delivered: false, instance: 'inst-send', reason: 'unreachable' })
+    expect(result).toEqual({ delivered: false, instance: 'inst-send', reason: 'peer-not-configured' })
     await receiver.dispose()
   })
 
@@ -2094,6 +2109,45 @@ describe('interconnect outbound timeouts', () => {
       await new Promise<void>((resolve, reject) => {
         wss.close((error) => { if (error === undefined) resolve(); else reject(error) })
       })
+    }
+  })
+})
+
+describe('interconnect peer status', () => {
+  it('reports no peers when none are configured', async () => {
+    const sender = await mounted('secret', new Set([]))
+    expect(sender.ctx.interconnect.peers()).toEqual([])
+    await sender.dispose()
+  })
+
+  it('reports a configured peer whose link never opens as down, keeping its origin', async () => {
+    const sender = await mounted('secret', new Set([]), { 'dead-peer': 'http://127.0.0.1:1' })
+    // The row exists from activation, before any dial settles: the peer is
+    // configured and merely unreachable, which is the distinction this accessor
+    // exists to draw.
+    expect(sender.ctx.interconnect.peers()).toEqual([
+      { instanceId: 'dead-peer', origin: 'http://127.0.0.1:1', link: 'down' },
+    ])
+    await sender.dispose()
+  })
+
+  it('reports a live link as up and drops it to down when the dial closes', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]))
+    const r = await serveUpgrade(receiver.upgrades)
+    const origin = `http://127.0.0.1:${String(r.port)}`
+    const sender = await mounted('secret', new Set([]), { 'peer-b': origin })
+    try {
+      await awaitLink(sender.ctx.interconnect, 'peer-b')
+      expect(sender.ctx.interconnect.peers()).toEqual([{ instanceId: 'peer-b', origin, link: 'up' }])
+      // A closed dial keeps its row: the reconnect loop still owns the route, so
+      // the peer stays configured and only its link state changes.
+      routeState(sender.service, 'peer-b').close()
+      await waitUntil(() => sender.ctx.interconnect.peers()[0]?.link === 'down')
+      expect(sender.ctx.interconnect.peers()).toEqual([{ instanceId: 'peer-b', origin, link: 'down' }])
+    } finally {
+      await sender.dispose()
+      await r.close()
+      await receiver.dispose()
     }
   })
 })
@@ -2723,6 +2777,23 @@ describe('interconnect msg-result discriminant schema', () => {
     const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
     handlers.get('message')!(JSON.stringify({ type: 'msg-result', reqId: 'm-1', result: { delivered: true, instance: 'x' } }))
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('dropping malformed link frame'))
+    warn.mockRestore()
+    await receiver.dispose()
+  })
+  it('rejects a local-only failure reason a receiver could never answer with', async () => {
+    // `peer-not-configured` describes THIS instance's own routing table, so no
+    // peer can produce it. Admitting it from the wire would let a peer fake a
+    // local configuration verdict, so the result schema must drop the frame.
+    const receiver = await mounted('secret', new Set([]))
+    const { socket, handlers } = fakeSocket()
+    attachSocket(receiver.service, socket)
+    const warn = vi.spyOn(receiver.ctx.logger, 'warn').mockImplementation(() => {})
+    handlers.get('message')!(JSON.stringify({
+      type: 'msg-result',
+      reqId: 'm-1',
+      result: { delivered: false, instance: 'x', reason: 'peer-not-configured' },
+    }))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('dropping malformed link frame'))
     warn.mockRestore()
     await receiver.dispose()
   })
