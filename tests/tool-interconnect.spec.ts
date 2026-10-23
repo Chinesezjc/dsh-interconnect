@@ -62,7 +62,7 @@ describe('tool-interconnect', () => {
     for (const name of names) expect(ctx.tools.get(name)).toBeUndefined()
   })
 
-  it('forwards resume only when asked, keeping the key absent by default', async () => {
+  it('defaults resume on for send and forwards an explicit false', async () => {
     const interconnect = fakeInterconnect()
     const { ctx, dispose } = await mounted(interconnect)
     const tool = ctx.tools.get('interconnect_send')!
@@ -72,13 +72,19 @@ describe('tool-interconnect', () => {
     )
     // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
     const mock = interconnect.send as unknown as { mock: { calls: [Record<string, unknown>][] } }
-    expect('resume' in mock.mock.calls[0]![0]).toBe(false)
+    expect(mock.mock.calls[0]![0].resume).toBe(true)
+
+    await tool.execute(
+      { instanceId: 'peer', sessionId: 'sess-1', text: 'hi', resume: false },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(mock.mock.calls[1]![0].resume).toBe(false)
 
     await tool.execute(
       { instanceId: 'peer', sessionId: 'sess-1', text: 'hi', resume: true },
       { signal: new AbortController().signal } as never,
     )
-    expect(mock.mock.calls[1]![0].resume).toBe(true)
+    expect(mock.mock.calls[2]![0].resume).toBe(true)
     await dispose()
   })
 
@@ -145,12 +151,13 @@ describe('tool-interconnect', () => {
       instanceId: 'peer',
       sessionId: 'sess-1',
       text: 'hi',
+      resume: true,
     })
     expect(value).toEqual({ delivered: true, instance: 'peer' })
     await dispose()
   })
 
-  it('surfaces the failure reason and points at interconnect_list for a not-live target', async () => {
+  it('explains an unwakeable not-live target without suggesting a different session', async () => {
     const interconnect = fakeInterconnect({
       send: vi.fn(async () => ({
         delivered: false,
@@ -168,28 +175,24 @@ describe('tool-interconnect', () => {
     const rendered = tool.output.render({ instanceId: 'peer', sessionId: 'sess-gone', text: 'hi' }, value as never)
     const text = (rendered as { type: 'text'; text: string }[])[0]!.text
     expect(text).toContain('sess-gone')
-    expect(text).toContain('interconnect_list')
+    expect(text).toContain('could not be woken')
+    expect(text).toContain('not delivered to any other session')
     await dispose()
   })
 
-  it('stops suggesting resume when the caller already asked for it', async () => {
-    const interconnect = fakeInterconnect({
-      send: vi.fn(async () => ({
-        delivered: false,
-        instance: 'peer',
-        reason: 'session-not-live' as const,
-      })),
-    })
-    const { ctx, dispose } = await mounted(interconnect)
+  it('separates disabled waking from an unwakeable receiver', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
     const tool = ctx.tools.get('interconnect_send')!
-    const value = await tool.execute(
-      { instanceId: 'peer', sessionId: 'sess-gone', text: 'hi', resume: true },
-      { signal: new AbortController().signal } as never,
-    )
-    const rendered = tool.output.render({ instanceId: 'peer', sessionId: 'sess-gone', text: 'hi', resume: true }, value as never)
-    const text = (rendered as { type: 'text'; text: string }[])[0]!.text
-    expect(text).toContain('interconnect_list')
-    expect(text).not.toContain('set resume')
+    const value = { delivered: false, instance: 'peer', reason: 'session-not-live' as const }
+    const disabled = tool.output.render(
+      { instanceId: 'peer', sessionId: 'sess-gone', text: 'hi', resume: false },
+      value,
+    ) as { text: string }[]
+    expect(disabled[0]!.text).toContain('waking was disabled')
+    expect(disabled[0]!.text).toContain('not delivered to any other session')
+    const unwakeable = tool.output.render({ instanceId: 'peer', sessionId: 'sess-gone', text: 'hi' }, value) as { text: string }[]
+    expect(unwakeable[0]!.text).toContain('could not be woken')
+    expect(unwakeable[0]!.text).not.toContain('set resume')
     await dispose()
   })
 
@@ -232,6 +235,7 @@ describe('tool-interconnect', () => {
       sessionId: 'sess-1',
       text: 'urgent',
       delivery: 'steer',
+      resume: true,
     })
     expect(value).toEqual({ delivered: true, instance: 'peer', delivery: 'steer' })
     await dispose()
@@ -391,7 +395,7 @@ describe('tool-interconnect', () => {
       { agent: { session: { id: 'local-sess' } }, signal: new AbortController().signal } as never,
     )
     // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
-    expect(interconnect.reply).toHaveBeenCalledWith({ sessionId: 'local-sess', text: 'hi back' })
+    expect(interconnect.reply).toHaveBeenCalledWith({ sessionId: 'local-sess', text: 'hi back', resume: true })
     expect(value).toEqual({ delivered: true, instance: 'peer' })
     await dispose()
   })
@@ -411,6 +415,7 @@ describe('tool-interconnect', () => {
       sessionId: 'local-sess',
       text: 'quiet reply',
       delivery: 'inject',
+      resume: true,
     })
     expect(value).toEqual({ delivered: true, instance: 'peer', delivery: 'inject' })
     await dispose()
@@ -473,6 +478,7 @@ describe('tool-interconnect', () => {
       sessionId: 'sess-1',
       text: 'hi',
       sender: { instanceId: 'me', sessionId: 'sender-sess' },
+      resume: true,
     })
     await dispose()
   })
@@ -598,6 +604,20 @@ describe('tool-interconnect list and reply optionals', () => {
     const tool = ctx.tools.get('interconnect_list')!
     const rendered = tool.output.render({ instanceId: 'peer' }, { reachable: true })
     expect((rendered as { text: string }[])[0]!.text).toBe('no live sessions on (unknown instance)')
+    await dispose()
+  })
+
+  it('defaults resume on for a reply and forwards an explicit false', async () => {
+    const interconnect = fakeInterconnect()
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_reply')!
+    const exec = { agent: { session: { id: 'local-sess' } }, signal: new AbortController().signal } as never
+    await tool.execute({ text: 'default wake' }, exec)
+    // oxlint-disable-next-line typescript/unbound-method -- mock arrow, no `this`
+    const mock = interconnect.reply as unknown as { mock: { calls: [Record<string, unknown>][] } }
+    expect(mock.mock.calls[0]![0].resume).toBe(true)
+    await tool.execute({ text: 'leave asleep', resume: false }, exec)
+    expect(mock.mock.calls[1]![0].resume).toBe(false)
     await dispose()
   })
 

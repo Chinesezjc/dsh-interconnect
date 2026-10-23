@@ -97,12 +97,12 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'interconnect_send',
-    description: 'Deliver one text message to a live session on another DSH instance (same machine, '
+    description: 'Deliver one text message to a session on another DSH instance (same machine, '
       + 'another machine, or another session). '
       + 'Returns whether the peer instance received it and which instance answered. '
-      + 'Only a live session receives directly; a persisted one can be woken by '
-      + 'setting resume, and when delivery fails the result reports the reason (for example '
-      + '"session-not-live") and interconnect_list shows which sessions are live there. '
+      + 'A live session receives directly; a persisted session with no live agent is woken by '
+      + 'default (resume), and when delivery fails the result reports the reason (for example '
+      + '"session-not-live" or "resume-refused"). '
       + 'The sending instance and session ids are attached automatically, so the receiver can reply '
       + 'with interconnect_reply; do not pass a sender parameter.',
     parameters: {
@@ -134,11 +134,11 @@ export function apply(ctx: Context): void {
       },
       resume: {
         type: 'boolean',
-        description: 'Wake the target session if it is persisted but not live. Off by '
-          + 'default because delivery to a woken session starts a real agent turn — a billed model call '
-          + 'with that session\'s full toolset — in a conversation nobody is watching. Prefer '
-          + 'interconnect_list and an already-live target; set this only when that specific session must '
-          + 'be reached. The receiver may refuse, answering reason "resume-refused".',
+        description: 'Wake the target session if it is persisted but not live. Defaults to true: '
+          + 'waking starts a real agent turn — a billed model call with that session\'s full toolset — '
+          + 'on the receiver, which is what makes an offline target reachable. Set false to leave it '
+          + 'asleep and report reason "session-not-live". The receiver may still refuse, answering '
+          + 'reason "resume-refused".',
       },
     },
     output: {
@@ -172,13 +172,15 @@ export function apply(ctx: Context): void {
               return 'not delivered: the message is too large for the peer link (limit 1 MiB);'
                 + ' shorten the text and try again'
             default:
-              // When the caller already asked to wake this session, the only
-              // honest next step is choosing a live target, not re-requesting
-              // resume.
+              // Waking is the default now, so a not-live answer has only two
+              // causes: the caller disabled waking, or the receiver has no
+              // resuming agent lookup. Neither justifies delivering the same
+              // message to a different session.
               return `not delivered: no live session "${_args.sessionId}" on ${value.instance}`
-                + (_args.resume === true
-                  ? ' — use interconnect_list to see which sessions are live there'
-                  : ' — use interconnect_list to see which sessions are live there, or set resume to wake this one')
+                + (_args.resume === false
+                  ? ' — waking was disabled (resume: false); the message was not delivered to any other session'
+                  : ' — it could not be woken there (the receiver has no resuming agent lookup);'
+                    + ' the message was not delivered to any other session')
           }
         })()
         return [{ type: 'text', text }]
@@ -196,7 +198,9 @@ export function apply(ctx: Context): void {
         // as a reply target.
         ...(sessionId === undefined ? {} : { sender: interconnect.selfSender(String(sessionId)) }),
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
-        ...(args.resume === undefined ? {} : { resume: args.resume }),
+        // Waking is the default: a persisted target with no live agent is
+        // otherwise unreachable, and a caller that wants it left asleep passes false.
+        resume: args.resume ?? true,
       }))
       return deliveryOutcome(result)
     },
@@ -399,8 +403,10 @@ export function apply(ctx: Context): void {
       },
       resume: {
         type: 'boolean',
-        description: 'Wake the target session if it is persisted but not live, as in '
-          + 'interconnect_send. Off by default; the receiver may refuse.',
+        description: 'Wake the recorded sender\'s session if it is persisted but not live. '
+          + 'Defaults to true: a reply completes an interchange the sender started, so the session is '
+          + 'woken by a real billed agent turn on the receiver. Set false to leave it asleep and report '
+          + 'reason "session-not-live". The receiver may still refuse, answering "resume-refused".',
       },
     },
     output: {
@@ -437,6 +443,10 @@ export function apply(ctx: Context): void {
             return 'not delivered: could not wake the recorded sender\'s session'
           }
           return 'not delivered: the recorded sender\'s session is not live'
+            + (_args.resume === false
+              ? ' — waking was disabled (resume: false); the reply was not sent to any other session'
+              : ' — it could not be woken there (the receiver has no resuming agent lookup);'
+                + ' the reply was not sent to any other session')
         })()
         return [{ type: 'text', text }]
       },
@@ -453,7 +463,8 @@ export function apply(ctx: Context): void {
         sessionId: String(exec.agent.session.id),
         text: args.text,
         ...(args.delivery === undefined ? {} : { delivery: args.delivery }),
-        ...(args.resume === undefined ? {} : { resume: args.resume }),
+        // Replying to a sender that has gone offline should still reach it.
+        resume: args.resume ?? true,
       }))
       return deliveryOutcome(result)
     },

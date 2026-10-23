@@ -19,7 +19,7 @@
 
 - `interconnect_peers`：列出本实例**已配置**的对端及其拨号链路状态（`up`/`down`），用于在不知道
   peer id 时先看有哪些可用目标，也是区分「没配这个 peer」与「配了但链路不通」的唯一入口
-- `interconnect_send`：向对端实例的指定 session 投递消息；可选 `delivery` 选投递模式、`resume` 唤醒离线 session
+- `interconnect_send`：向对端实例的指定 session 投递消息；默认唤醒没有 live agent 的持久 session（`resume: false` 关闭），可选 `delivery` 选投递模式
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
 - `interconnect_reply`：向记录过的发送方回传消息，只需文本；回信 session 是本 agent 自己的，无需再次寻址
@@ -141,11 +141,11 @@ interconnect_reply(text="reply")
 
 | `reason` | 含义 | 应对 |
 |---|---|---|
-| `session-not-live` | 对端**答复了**，但那个 session 没有运行中的 agent | 重试同一个 id 无用；用 `interconnect_list` 换目标，或带 `resume` |
+| `session-not-live` | 对端**答复了**，但那个 session 没有 live agent，且唤醒被关闭（`resume: false`）或对端无法唤醒 | 不要改投其它 session；报告失败，或移除 `resume: false` 后重试 |
 | `unreachable` | 配了该对端，但没拿到可用答复（链路断，或鉴权被拒） | 目标 session 可能完好，链路重连后重试可能成功 |
 | `peer-not-configured` | 本实例的 `peers` 里没有这个 `instanceId`，链路根本不存在 | 重试永远不会成功；补 `peers` 映射（patch 层改完即生效，见「寻址」一节），或改用 `interconnect_peers` 列出的 id |
-| `resume-refused` | 请求了唤醒，但对端不允许（`allowResume: false`） | 再带 `resume` 也没用 |
-| `resume-failed` | 允许唤醒且尝试了，但没得到 live agent（无此持久化 session，或被别的 owner 持有） | 换目标 |
+| `resume-refused` | 请求了唤醒，但对端不允许（`allowResume: false`） | 再请求也没用；不要改投其它 session，报告失败 |
+| `resume-failed` | 允许唤醒且尝试了，但没得到 live agent（无此持久化 session，或被别的 owner 持有） | 不要改投其它 session；报告失败 |
 | `session-owned-by-subagent` | 该 session 属于 subagent 路由，投递权在它的父 agent | 通过父 agent 触达，别直接投 |
 | `message-too-large` | 编好的帧超过链路帧上限（1 MiB），什么都没写、链路也没断 | 缩短文本，重发原文没用 |
 | `no-sender-known` | `reply` 指向的本地 session 从未记录过发送方（它没收到过带 `sender` 的消息，或对端版本过旧没带 `sender`） | 先用 `interconnect_send` 主动建立联系 |
@@ -172,18 +172,22 @@ Host 在 0.6 之后把这个谓词从 `@deepseek-ai/dsh-api-remotes` 移走，�
 已实测：起一个真实 subagent 后，`interconnect_list` 不包含它；直接 `send` 到它的 id 返回
 `session-owned-by-subagent`，消息**没有**进入 inbox。
 
-### 唤醒离线 session（`resume`，默认关）
+### 唤醒离线 session（`resume`，默认开）
 
-`SendPayload.resume: true` 让对端唤醒一个已持久化但没有运行 agent 的 session。
+投递目标是一个「已持久化但没有运行 agent」的 session 时默认会唤醒它：不带 `resume` 时
+`interconnect_send` 与 `interconnect_reply` 都按 `resume: true` 处理；传 `resume: false`
+才保持原样并返回 `session-not-live`。
 
-**默认关闭是有意的。** 实测确认：消息投递到 session 后会触发一次**完整的 agent 回合**——
-`wakeDriver()` → `kick()` → `turn()` → `llm.stream()`，即一次计费的模型调用，且 assembly
-里带着该 session 的完整工具集。在一个用户没打开、看不到、也无法中断的会话里启动这些，和
-「推一下已经开着的会话」不是一个量级，所以必须由发送方显式请求。
+**默认开启是 2026-10-23 的决定。** 实测确认：消息投递到 session 后会触发一次**完整的 agent
+回合**——`wakeDriver()` → `kick()` → `turn()` → `llm.stream()`，即一次计费的模型调用，且
+assembly 里带着该 session 的完整工具集。默认关闭时，最常见的结果不是省下这一次调用，而是
+投递失败后发送方改投另一个正在运行的 session：原会话永远收不到，别的会话收到一段不属于它的
+内容。目标通常是用户关心的那个会话，只是它此刻没在跑；所以默认唤醒它，把「不唤醒」留给明确
+这样要求的调用方。
 
-两侧都有控制权：
+两侧的控制权不变：
 
-- **发送方**按消息决定 `resume`（默认不唤醒）
+- **发送方**可逐条用 `resume: false` 关闭唤醒
 - **接收方**用 `Config.allowResume`（默认 `true`）一票否决——因为花钱和跑工具的是它那台机器；
   拒绝时在跑 lookup 之前就短路，回 `resume-refused`
 
@@ -199,15 +203,19 @@ context** 拥有，实测确认插件 fiber 被 dispose 时会把 resume 出来�
 唤醒**只把消息放进 inbox**，是否真的开始处理取决于 `delivery`：
 
 ```text
-# 唤醒并让对方实际处理（会起一个计费回合）
-interconnect_send(instanceId="peer", sessionId, text, resume=true, delivery="followup")
+# 默认：唤醒并让对方实际处理（会起一个计费回合）
+interconnect_send(instanceId="peer", sessionId, text, delivery="followup")
 
 # 唤醒但不起回合：只写入上下文，等对方下次被唤醒时一起读
-interconnect_send(instanceId="peer", sessionId, text, resume=true, delivery="inject")
+interconnect_send(instanceId="peer", sessionId, text, delivery="inject")
+
+# 不唤醒：目标保持原样，返回 session-not-live
+interconnect_send(instanceId="peer", sessionId, text, resume=false)
 ```
 
-已实测：`resume=true` + `inject` 之后目标从非 live 变 live（`interconnect_list` 计数 +1），
-且该 session 日志里只多一条 `agent/inbox/spliced`、**后面没有 `turn/start`**。
+已实测：唤醒（默认开启）+ `delivery="inject"` 之后目标从非 live 变 live
+（`interconnect_list` 计数 +1），且该 session 日志里只多一条 `agent/inbox/spliced`、
+**后面没有 `turn/start`**。
 
 **已知限制**：磁盘格式过旧的 session 无法唤醒，返回 `resume-failed`。这不是本插件的限制——
 Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedError`，同样失败。

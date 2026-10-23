@@ -2,6 +2,46 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.13.0（2026-10-23）
+
+让「投递到一个没有 live agent 的持久 session」默认可用：`interconnect_send` / `interconnect_reply`
+在调用方不指定 `resume` 时按 `true` 处理，传 `resume: false` 才保持原行为。原先默认关闭，实测中最常见的
+结果不是省下一次计费调用，而是投递失败后发送方改投另一个 live session——2026-10-23 的 #6734 协作里就发生了：
+本地会话回信给已离线的 momoairi sender 得到 `session-not-live`，随后把同一段内容发去了一个无关的 live
+session，原会话永远没收到这条回信。
+
+### 变更
+
+- **工具默认值**：`interconnect_send` / `interconnect_reply` 的 `resume` 默认从「不唤醒」改为「唤醒」。
+  线缆协议不变：`resume` 缺省仍表示不唤醒，变化只发生在工具层——两个工具现在总是显式发送该值
+  （`args.resume ?? true`），所以即使与旧版本对端互通，行为也与本机一致。
+- **失败文案**：`session-not-live` 的两个成因（调用方传了 `resume: false`；接收方没有 resuming agent
+  lookup）分别说明，并明确写「消息没有被投递给任何其它 session」。原先把 `interconnect_list` 作为
+  「换一个目标」的建议从这两处移除——那正是把消息送进错误会话的路径。
+- **skill 正文**：`resume` 说明改为默认开；新增 `## Addressing rules`（只投给目标会话，目标不可达时
+  报告失败，不要改投标题相似的会话）；workflow 第 3 步说明可以直接向已知 session id 发送，目标会被
+  默认唤醒。
+- **README**：唤醒语义、失败原因表与示例同步；记录默认开启的理由。
+- **`src/interconnect/types.ts` 的线缆 JSDoc 未改**：`SendPayload.resume` 的缺省语义仍是「不唤醒」，
+  默认值属于工具层策略，线上协议没有变化。
+
+### 验证
+
+- `pnpm exec vitest run`：4 files / 180 tests 全绿。新增/改写的断言覆盖：send 缺省调用服务时带
+  `resume: true`、send 传 `false` 时原样转发、reply 缺省带 `resume: true`、reply 传 `false` 时原样转发，
+  以及 `session-not-live` 两种成因的渲染（含「not delivered to any other session」）。
+  把 `args.resume ?? true` 改回「缺省省略」后，相关断言变红。
+- `pnpm run typecheck` 通过；`pnpm run build` 成功。
+- 构建产物与 0.12.0 比对：**6 个变**（`lib/index.js` `26ca420262dd3996`→`b22a451fec9c2b0a`、
+  `lib/interconnect/index.js` `e9c4f9326aedac27`→`ca649131b71ccdef`、
+  `lib/tool-interconnect/index.js` `a77dd91dc1fe612a`→`5db250e043e929d9`、
+  `assets/dsh-interconnect.md` `08fc5d67a300f8e0`→`725882ddbed87ff7`、
+  `dsh.plugin.json` `b1f9d44bf3c427b4`→`8e0230f68a04de22`）。其中 `lib/index.js` 与
+  `lib/interconnect/index.js` 的字节变化**只来自 sourcemap 里的 vendor 路径注释**：0.12.0 的构建路径
+  `~/.dsh/source/staging-20260807T143236Z` 已删除，本次构建在 `~/dsh` → `~/dsh-wt-ic-merge` 下运行。
+  `lib/skill-interconnect/index.js`（`f3503a044b6791e9`）、三个 `.d.ts`、`cordis.patch.yml`
+  （`b324e2a6f00f7515`）逐字节不变。0.13.0 的基线按本次构建记录。
+
 ## 0.12.0（2026-09-25）
 
 新增对端枚举工具，并把「本机没配这个对端」从 `unreachable` 里拆出来。原先 peer id 写错只会得到

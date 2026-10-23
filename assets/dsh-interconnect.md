@@ -21,10 +21,11 @@ Your job is to pick the right peer, the right tool, and the right target.
   moment. Use this first when you do not already know the target session id.
 - `interconnect_ping` — probe whether a peer instance is reachable and learn
   its self-reported instance id.
-- `interconnect_send` — deliver one text message to a live session on a peer
-  instance. Pass `instanceId`, `sessionId`, and `text`. The sending
-  instance/session identity is attached automatically by the tool, so you must
-  NOT pass a sender parameter.
+- `interconnect_send` — deliver one text message to a session on a peer
+  instance. Pass `instanceId`, `sessionId`, and `text`. A live session receives
+  directly; a persisted session with no live agent is woken by default. The
+  sending instance/session identity is attached automatically by the tool, so
+  you must NOT pass a sender parameter.
 - `interconnect_reply` — send a message back to the peer that this session last
   received an interconnect message from. Pass only the reply text. The replying
   session is this agent's own session, and the remote target is recalled
@@ -49,10 +50,25 @@ addresses.
    `interconnect_peers` and pick one whose link is `up`.
 2. If you know the peer instance but not the target session, call
    `interconnect_list(instanceId=...)` and choose a live session.
-3. Call `interconnect_send(instanceId=..., sessionId=..., text=...)`.
+3. Call `interconnect_send(instanceId=..., sessionId=..., text=...)`. If you
+   already know the target session id, send to it directly: a persisted session
+   with no live agent is woken by default.
 4. When a message arrives on your side and you need to respond, call
    `interconnect_reply(text=...)`. The replying session is this agent's own
-   session, and the recorded sender is used as the destination.
+   session, and the recorded sender is used as the destination; that sender is
+   woken by default when it is no longer live.
+
+## Addressing rules
+
+- Deliver a message only to the session it is meant for. When delivery fails
+  because that session is not live and cannot be woken, report the failure; do
+  not forward the same text to a different session, and do not pick another
+  session that merely looks related. Delivering to the wrong conversation is
+  worse than not delivering: the message is read by the wrong owner, and the
+  intended recipient never sees it.
+- Prefer the session id you were given or that the peer sent from. Use
+  `interconnect_list` to discover targets only when the target is not already
+  known, and do not treat similar titles as the same conversation.
 
 ## Delivery modes
 
@@ -69,19 +85,25 @@ Omit `delivery` to use the receiver's configured default.
 
 ## Waking offline sessions
 
-`resume` defaults to off. Setting `resume: true` asks the receiver to wake a
-persisted session with no live agent, which starts a real billed agent turn with
-that session's full toolset. Only use it when the specific session must be
-reached and the receiver allows it. Prefer `interconnect_list` and an
-already-live target when possible.
+`resume` defaults to on. Unless `resume: false` is passed, delivering to a
+persisted session with no live agent wakes it, which starts a real billed agent
+turn with that session's full toolset. Set `resume: false` to leave such a
+session asleep and get `session-not-live` instead; the receiver can still refuse
+every wake with `allowResume: false` (reason `resume-refused`).
+
+Waking is the default because the target of an interconnect message is usually a
+conversation that matters but is not currently running; a reply that cannot wake
+its sender never arrives, and a send that cannot wake an idle session is
+delivered to whatever session happens to be active instead.
 
 ## Failure reasons
 
 When a send/reply reports `delivered: false`, read `reason`:
 
 - `session-not-live` — the receiver answered, but that session has no live
-  agent. Use `interconnect_list` to choose another target, or consider
-  `resume`.
+  agent, and waking was disabled (`resume: false`) or is impossible on that
+  receiver (no resuming agent lookup). Do not deliver the same message to a
+  different session; report the failure, or retry with waking enabled.
 - `unreachable` — no usable answer arrived from a peer that IS configured; its
   link may be down, or the two instances may disagree on the shared token, so a
   later retry can succeed.
@@ -89,8 +111,8 @@ When a send/reply reports `delivered: false`, read `reason`:
   `instanceId`, so no link exists and none can be dialed. Retrying cannot help:
   report the id you used and let the user add it to the peers mapping, or pick an
   id from `interconnect_peers`.
-- `resume-refused` / `resume-failed` — waking is not allowed or did not work;
-  choose a live target instead.
+- `resume-refused` / `resume-failed` — waking is not allowed or did not work.
+  Do not reroute the message to a different session; report the failure.
 - `session-owned-by-subagent` — the session belongs to a subagent and its
   parent owns delivery; reach it through the parent.
 - `message-too-large` — the message is larger than the peer link can carry
