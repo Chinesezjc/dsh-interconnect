@@ -297,7 +297,11 @@ export type PeerLinkState = 'up' | 'down'
 export interface PeerStatus {
   /** The peer's `instanceId` as configured under {@link Config.peers}: a valid target for send/ping/list. */
   readonly instanceId: string
-  /** The origin this instance dials for that peer, as configured. */
+  /**
+   * The origin this instance dials for that peer. A `self` peer reports the
+   * resolved `http://127.0.0.1:<port>` once the host webserver listens, and
+   * the literal `self` while it does not.
+   */
   readonly origin: string
   /** Whether that dialed link is open right now; a closed one re-dials on its own backoff. */
   readonly link: PeerLinkState
@@ -321,11 +325,18 @@ export interface Config {
   /**
    * Peer instance routes, keyed by the peer's `instanceId`, valued by the
    * origin this instance dials to reach that peer (e.g. a tunnel endpoint
-   * `http://127.0.0.1:13080`). At activation each peer is linked over a
-   * persistent WebSocket (heartbeat + reconnect), and every outbound
-   * `send`/`reply`/`ping`/`list` is addressed by `instanceId` through that
-   * instance's own link. An origin is the ONLY routing authority — `instanceId`
-   * is never used to derive an address.
+   * `http://127.0.0.1:13080`), or by the literal `self` for this instance's
+   * own host webserver. A `self` route is resolved on every dial to
+   * `http://127.0.0.1:<webServer.port>`, so a host that assigns its port at
+   * listen time (`--port 0`, as DSH Desktop does) needs no config change after
+   * a restart; the route keys must equal `instanceId`, because the self dial
+   * reaches this instance's own inbound socket and reply routing plus event
+   * de-duplication match on the announced id. A `self` route with no listening
+   * webserver (a headless profile) stays `down` and logs why. At activation
+   * each peer is linked over a persistent WebSocket (heartbeat + reconnect),
+   * and every outbound `send`/`reply`/`ping`/`list` is addressed by
+   * `instanceId` through that instance's own link. An origin is the ONLY
+   * routing authority — `instanceId` is never used to derive an address.
    *
    * Fan-out of local lifecycle events goes to every live peer, including an
    * inbound peer that is not in this map; an event travels over the link this

@@ -2,6 +2,46 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.15.0（2026-11-05）
+
+支持同实例自指 peer：`peers` 的值可以写成字面量 `self`，拨号时用宿主 webserver 当前监听的端口
+拼出 `http://127.0.0.1:<port>`。DSH Desktop 的宿主以 `--port 0` 启动，Web 端口每次启动由操作
+系统随机分配；静态 origin 的自指配置因此每次重启都失效，而插件原先只接受静态 origin，没有任何
+从自身 webserver 推导地址的入口（issue #6）。跨机部署不受影响，仍写固定 origin。
+
+### 变更
+
+- **`peers` 新增 `self` 值**：`{ [对端 instanceId]: 'self' }` 表示拨向本实例自己的宿主
+  webserver。origin 在每次拨号时从 `webServer.port` 重新拼出，端口变化（包括 Desktop 每次重启
+  换端口）不需要改配置；webserver 尚未监听时链路保持 down 并按退避重试。
+- **键约束**：`self` 路由的键必须等于本实例的 `instanceId`，否则激活时直接报错。自指链路拨到
+  本实例自己的入站 socket，`hello` 自报的是该 id；键不同会让回信寻址落到 `peer-not-configured`，
+  并让本地事件经两条 socket 各投一次。
+- **headless 行为**：没有 webserver 的部署里 `self` 链路保持 down，并记录一条说明原因（无监听
+  webserver）的日志；它仍算已配置，`ping`/`send` 报 `unreachable` 而不是 `peer-not-configured`。
+- **`interconnect_peers` 的 origin 列**：`self` 路由在端口就绪前显示字面量 `self`，就绪后显示
+  解析出的 `http://127.0.0.1:<port>`。
+- **文档**：README 新增「同一实例内两个会话互通（`self`）」，配置表与 headless 说明同步；
+  `Config.peers` 与 `PeerStatus.origin` 的 JSDoc 写明哨兵与解析规则。
+- **线缆协议不变**：没有增删任何帧字段；`self` 只是本机的配置写法，对端看到的仍是普通 WS 链路。
+
+### 验证
+
+- 对公开 `deepseek-ai/deepseek-harness` master（0.2.2-rc.1）分别跑 typecheck、185/185 tests、
+  build，全部通过。新增 4 条用例：`self` 链路在端口出现
+  后自动转 up 并把 `send` 回环投递到本实例；真实 `WebServer` 以 `port: 0` 启动（DSH Desktop
+  的启动参数）时解析出实际端口并经它的升级路由完成同一回环；headless 下保持 down 且 warn；
+  键不等于 `instanceId` 时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，
+  回环用例转红；删掉键约束，键用例转红。
+- 构建产物与 0.14.0 比对：**4 个变**（`lib/index.js`
+  `6a0c58c78cc7dc76`→`808e57440ea165e1`、`lib/interconnect/index.js`
+  `31f77d024329f6cc`→`f4bd9244fd4508db`、`lib/tool-interconnect/index.js`
+  `670d89a64b6f1cc0`→`df5ac78622d29d87`、`dsh.plugin.json`
+  `7410df8e335fb673`→`b146fd7f295fa07e`）。`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）、`cordis.patch.yml`（`b324e2a6f00f7515`）与
+  `lib/types/interconnect/{index,types}.d.ts` 逐字节不变。`tool-interconnect` 的 bundle 内联了
+  服务实现，所以它也随本次服务改动变化。
+
 ## 0.14.0（2026-11-05）
 
 适配公开 DSH 0.2.x 的破坏性变化，让 `pnpm run check` 重新对
