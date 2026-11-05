@@ -44,7 +44,7 @@
 - `interconnect_peers()`（不接受参数；返回本实例配置的全部对端及其链路状态）
 - `interconnect_reply(text=...)`（只需文本；回信 session 是本 agent 自己的，目标从记录的 sender 解析）
 
-`instanceId` 是 `interconnect` 行 `peers` 映射里的键；真正用来拨号的 origin 由该映射的值给出（例如隧道端点 `http://127.0.0.1:13080`），**instanceId 本身从不出现在线上**，也不参与路由——origin 才是唯一的拨号依据。
+`instanceId` 是 `interconnect` 行 `peers` 映射里的键；真正用来拨号的 origin 由该映射的值给出（例如隧道端点 `http://127.0.0.1:13080`），**instanceId 本身从不出现在线上**，也不参与路由——origin 才是唯一的拨号依据。值也可以是字面量 `self`，表示拨向本实例自己的宿主 webserver（见「同一实例内两个会话互通」）。
 
 对端没配在这里时，`send`/`reply` 返回 `peer-not-configured`，`ping`/`list` 则在返回
 `reachable: false` 的同时带上 `configured: false`——这一支**重试永远不会成功**，只能去补
@@ -87,6 +87,32 @@ session-b07326da-…                          [running]
 对端不上报截断标志，所以 `interconnect_list` 只在收到的行数正好等于该上限时追加一行提示
 （`100 of possibly more live sessions`）——满页**可能**被截断，缺失的目标仍可能 live。
 ping 与 list 的答复还会按调用方问的 kind 校验形状，形状不符按「无答复」处理（对应 `unreachable`）。
+
+### 同一实例内两个会话互通（`self`）
+
+同一台 DSH 上两个 session 互相投递时，把 peer 的值写成字面量 `self`，不要写死端口：
+
+```yaml
+- id: interconnect
+  config:
+    instanceId: desktop
+    peers:
+      desktop: self   # 键必须等于本实例的 instanceId
+```
+
+`self` 不是 origin。拨号时插件用宿主 webserver **当前监听**的端口拼出
+`http://127.0.0.1:<port>`（绑定 `0.0.0.0` 时回环同样可达），所以宿主以 `--port 0`
+启动、每次重启换端口（DSH Desktop 的默认行为）时不需要改配置，也不需要重启后手工同步。
+
+- **键必须等于 `instanceId`**：自指链路拨到本实例自己的入站 socket，对端在 `hello` 里自报的
+  就是这个 id；键不同会被当成另一个 peer，回信寻址和事件去重都对不上。配置加载时直接报错，
+  而不是留下一条半可用的链路。
+- **端口在每次拨号时重新读取**：webserver 比本插件晚激活、或还没开始监听时，链路保持 `down`
+  并按退避重试，端口就绪后自动连上。`interconnect_peers` 在解析前把 origin 列显示为 `self`，
+  解析后显示实际的 `http://127.0.0.1:<port>`。
+- **没有 webserver 的部署**（headless profile）里这条链路保持 `down`，日志说明它是 self 路由
+  且当前没有监听中的 webserver；`ping`/`send` 按「已配置但不可达」处理，不会得到
+  `peer-not-configured`。
 
 ### 回复（`reply`）
 
@@ -242,7 +268,7 @@ Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedEr
 |---|---|---|
 | `instanceId` | `'dsh'` | 本实例自报的 id，出现在 `ping`/`send`/`list` 的回包里。也作为「对端如何寻址到我」的身份 |
 | `requestTimeoutMs` | `10000` | 出站请求超时，上限 60000 |
-| `peers` | `{}` | **对端路由映射**：`{ [对端 instanceId]: 我拨向它的 origin }`，例如隧道端点 `http://127.0.0.1:13080`。激活时对每个对端自动建持久 WS 链；`send`/`reply`/`ping`/`list` 都按 instanceId 走对应链接。改这一行不需要重启：profile patch 层的改动会重建 fiber 并按新映射建链 |
+| `peers` | `{}` | **对端路由映射**：`{ [对端 instanceId]: 我拨向它的 origin }`，例如隧道端点 `http://127.0.0.1:13080`；值也可以是字面量 `self`，表示拨向本实例自己的宿主 webserver，端口在拨号时从 `webServer.port` 读取（键必须等于 `instanceId`，见「同一实例内两个会话互通」）。激活时对每个对端自动建持久 WS 链；`send`/`reply`/`ping`/`list` 都按 instanceId 走对应链接。改这一行不需要重启：profile patch 层的改动会重建 fiber 并按新映射建链 |
 | `delivery` | `'followup'` | 入站消息未带 `delivery` 时的默认投递模式 |
 | `allowResume` | `true` | 是否允许发送方用 `resume` 唤醒本机的离线 session |
 
@@ -365,6 +391,7 @@ config）：
 
 改完不用重启：patch 层的改动会重建 fiber 并按新映射建链。key 建议与对端自报的 `instanceId`
 一致，否则 B 拨入的那条链路在 A 侧认不出是同一个 peer，事件会重复一份（服务会 warn 一次）。
+同一台机器上的自指场景不走这一节：把值写成 `self`，见「同一实例内两个会话互通」，不需要隧道。
 
 ### 5. 按顺序验证
 
@@ -399,13 +426,14 @@ pnpm run build    # esbuild → lib/
   的 isolate realm 会导致工具/技能行无法 inject 到该服务。
 - 服务只 inject `agents` 与 `credentials`；**宿主 webserver 是可选的**。有 webserver 时入站
   升级路由注册在它上面（`webServer` 经等待式 inject fiber 接入，与组合顺序无关）；没有
-  webserver 的 profile（例如 headless）里服务仍会拨号已配置对端并经这些出站链接投递，即
-  仅出站模式。`dsh.plugin.json` 的 `inject` 与之一致，只有 `agents`、`credentials`。
+  webserver 的 profile（例如 headless）里服务仍会拨号已配置的固定 origin 对端并经这些出站链接
+  投递，即仅出站模式；`self` 路由没有 origin 可拨，会保持 `down` 并记录原因。
+  `dsh.plugin.json` 的 `inject` 与之一致，只有 `agents`、`credentials`。
 - `ws` 是运行依赖，由宿主的 node_modules 提供（构建时 external）。
 
 ## 验证
 
-- 179/179 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、本机原因不得从线缆上来的负例等回归用例）；
+- 183/183 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、`self` 路由的端口延迟解析/headless 降级/键约束、本机原因不得从线缆上来的负例等回归用例）；
   类型检查、构建均干净。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。

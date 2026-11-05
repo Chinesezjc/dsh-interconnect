@@ -16,7 +16,7 @@ import { Context, Service, LoggerService } from '@deepseek-ai/cordis'
 import { createHash, randomUUID, timingSafeEqual as constantTimeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
-import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { WebServer, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 // The Host's resolver reports a subagent-owned session as a Remote failure, and
 // that code is the only ownership signal a cold session carries.
@@ -134,6 +134,13 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 const LINK_HANDSHAKE_TIMEOUT_MS = 10_000
 /** WebSocket upgrade pathname owning the persistent peer link. */
 const LINK_CHANNEL = '/interconnect/link'
+/**
+ * `Config.peers` value meaning "dial this instance's own host webserver". It is
+ * a sentinel rather than an origin: the real origin includes the listening
+ * port, which a host started with `--port 0` assigns only at listen time and
+ * may pick differently on every start.
+ */
+const SELF_PEER_ORIGIN = 'self'
 /**
  * Longest `instanceId` a deployment may configure. Every frame this instance
  * writes carries it (the `hello` announcement, answers, and results), so an
@@ -397,18 +404,33 @@ export class InterconnectService extends Service {
     this.delivery = config.delivery ?? 'followup'
     /* v8 ignore next 1 -- the Config schema applies its allowResume default before the constructor runs. */
     this.allowResume = config.allowResume ?? true
-    // Validate every peer origin before dialing any of them: the same URL
+    // Validate every fixed peer origin before dialing any of them: the same URL
     // construction dial() uses, so a malformed origin fails the load before a
-    // socket or reconnect loop exists to leak (misconfiguration fails loud).
+    // socket or reconnect loop exists to leak (misconfiguration fails loud). A
+    // `self` route has no fixed origin to validate, but its key must be the id
+    // this instance announces: the self dial reaches its own inbound socket,
+    // and reply routing and event de-duplication both match on that announced
+    // id. A different key would make self links answer `peer-not-configured`
+    // on reply and deliver every local event twice.
     /* v8 ignore next 2 -- the Config schema applies its peers default before the constructor runs. */
-    for (const origin of Object.values(config.peers ?? {})) {
+    for (const [peerInstanceId, origin] of Object.entries(config.peers ?? {})) {
+      if (origin === SELF_PEER_ORIGIN) {
+        if (peerInstanceId !== this.instanceId) {
+          throw new Error(
+            `interconnect: peer "${peerInstanceId}" is configured as self, but this instance announces "${this.instanceId}"; key a self peer by the instanceId`,
+          )
+        }
+        continue
+      }
       linkUrl(trimBase(origin))
     }
     // Link every configured peer at activation: all delivery is over these
-    // persistent links, and addressing is by instanceId through them.
+    // persistent links, and addressing is by instanceId through them. A self
+    // route resolves its origin on each dial, so a port assigned only when the
+    // webserver starts (or changed by a restart) needs no config update.
     /* v8 ignore next 1 -- the Config schema applies its peers default before the constructor runs. */
     for (const [peerInstanceId, origin] of Object.entries(config.peers ?? {})) {
-      this.link(peerInstanceId, origin)
+      this.link(peerInstanceId, origin === SELF_PEER_ORIGIN ? () => this.selfOrigin() : origin)
     }
 
     const upgrade: WebUpgradeRoute = {
@@ -731,18 +753,37 @@ export class InterconnectService extends Service {
    * `Config.peers` entry; the resulting state owns reconnection for the life of
    * the service fiber.
    * @param instanceId - the peer's `instanceId`.
-   * @param origin - receiver origin this instance dials, e.g. `http://127.0.0.1:13080`.
+   * @param origin - receiver origin this instance dials (e.g.
+   *   `http://127.0.0.1:13080`), or a resolver for a `self` route.
    */
-  private link(instanceId: string, origin: string): void {
+  private link(instanceId: string, origin: PeerOrigin): void {
     const state = new LinkState(
       (socket) => { this.attachDialedSocket(socket, instanceId) },
       this.ctx.logger,
       () => this.resolveToken(),
       instanceId,
-      trimBase(origin),
+      typeof origin === 'string' ? trimBase(origin) : origin,
     )
     this.linkStates.set(instanceId, state)
     state.dial()
+  }
+
+  /**
+   * The origin of this instance's own host webserver, or undefined while no
+   * listening port exists. Read on every dial rather than cached: the
+   * webserver may activate after this service, its port is assigned only in
+   * its listen callback (`--port 0` picks a fresh one per start), and a
+   * replacement webserver would move it again. Loopback is used regardless of
+   * the bind host: a server bound to `0.0.0.0` also accepts `127.0.0.1`, while
+   * `0.0.0.0` itself is a bind address, not a dialable origin.
+   * @returns `http://127.0.0.1:<port>`, or undefined without a listening server.
+   */
+  private selfOrigin(): string | undefined {
+    const server = this.ctx.get('webServer')
+    if (server === undefined) return undefined
+    const port = server.port
+    if (typeof port !== 'number' || port <= 0) return undefined
+    return `http://127.0.0.1:${String(port)}`
   }
 
   /** Push one serialized lifecycle fact out to every linked peer over WS. */
@@ -1327,6 +1368,12 @@ interface DialedSocket {
 }
 
 /**
+ * Where a link dials: a fixed origin, or a resolver that returns undefined
+ * while no origin exists yet (a `self` route before the host webserver listens).
+ */
+type PeerOrigin = string | (() => string | undefined)
+
+/**
  * One outbound WebSocket peer link: dials, re-dials with backoff after an
  * unexpected drop, and joins the service's live socket pool once open, so
  * local events fan out over the link and the peer's pushes come back in.
@@ -1337,34 +1384,58 @@ class LinkState {
   private retry = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private warnedNoToken = false
+  private warnedNoOrigin = false
 
-  /** Receiver origin this link dials. */
-  readonly peer: string
   readonly instanceId: string
+  private readonly origin: PeerOrigin
 
   constructor(
     private readonly attachSocket: (socket: WebSocket) => void,
     private readonly logger: LoggerService,
     private readonly resolveToken: () => Promise<string | undefined>,
     instanceId: string,
-    origin: string,
+    origin: PeerOrigin,
   ) {
     this.instanceId = instanceId
-    this.peer = origin
+    this.origin = origin
+  }
+
+  /** The origin this link dials now; for an unresolved `self` route, the sentinel is shown. */
+  get peer(): string {
+    return typeof this.origin === 'string' ? this.origin : this.origin() ?? SELF_PEER_ORIGIN
   }
 
   /** Open the socket; reconnect is scheduled by the close handler. */
   dial(): void {
     /* v8 ignore next 1 -- close() removes the link state from the map before any later dial can observe it. */
     if (this.closed) return
+    const origin = typeof this.origin === 'string' ? this.origin : this.origin()
+    if (origin === undefined) {
+      // A self route needs the host webserver's listening port, which can
+      // appear (or move) after this service activates. Keep the link down and
+      // retry on the reconnect backoff rather than failing the load. The
+      // warning waits for one retry, so a normal boot (where the webserver
+      // starts listening within the first backoff) does not log a transient
+      // failure; a headless profile never resolves a port and does.
+      if (this.retry >= 1 && !this.warnedNoOrigin) {
+        this.warnedNoOrigin = true
+        this.logger.warn(
+          `interconnect: peer ${this.instanceId} is configured as self but this instance has no listening webServer port yet; the link stays down and retries`,
+        )
+      }
+      this.scheduleReconnect()
+      return
+    }
+    this.warnedNoOrigin = false
     let url: URL
     try {
-      url = linkUrl(this.peer)
+      url = linkUrl(origin)
     } catch {
       // The constructor pre-validates configured origins, so a malformed one
-      // here can only come from a deployment whose config bypassed validation;
-      // it degrades to a down link rather than a thrown dial.
-      this.logger.warn(`interconnect: invalid peer origin ${this.peer}; link to ${this.instanceId} stays down`)
+      // here can only come from a deployment whose config bypassed validation
+      // or from a host webserver reporting an unusable port; it degrades to a
+      // down link rather than a thrown dial.
+      this.logger.warn(`interconnect: invalid peer origin ${origin}; link to ${this.instanceId} stays down`)
       return
     }
     void this.resolveToken().then((token) => {

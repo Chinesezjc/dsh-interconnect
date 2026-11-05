@@ -18,13 +18,26 @@ import type { LinkFrame } from '../src/interconnect/types.ts'
 import type { RawData } from 'ws'
 import WebSocket, { WebSocketServer } from 'ws'
 
-/** Structural httpServer fake recording the upgrade registries this service touches. */
-function fakeHttpServer(upgrades: WebUpgradeRoute[]): Pick<WebServer, 'registerUpgrade'> {
+/**
+ * Structural httpServer fake recording the upgrade registry this service
+ * touches. A `self` peer reads `port`/`host`, so those mirror the real
+ * webserver: the port is a getter (0 until listen, then the assigned value)
+ * rather than a captured number.
+ * @param upgrades - registry the fake appends registered routes to.
+ * @param port - current listening port; defaults to 0 (not listening yet).
+ * @returns the subset of `WebServer` the interconnect service reads.
+ */
+function fakeHttpServer(
+  upgrades: WebUpgradeRoute[],
+  port: () => number = () => 0,
+): Pick<WebServer, 'registerUpgrade' | 'port' | 'host'> {
   return {
     registerUpgrade(route) {
       upgrades.push(route)
       return () => { upgrades.splice(upgrades.indexOf(route), 1) }
     },
+    get port() { return port() },
+    host: '127.0.0.1',
   }
 }
 
@@ -223,6 +236,8 @@ interface MountOptions {
   readonly provides?: Record<string, unknown>
   /** Set false to mount without a `webServer` row (outbound-only mode). */
   readonly webServer?: boolean
+  /** Reading the fake webserver's current port; 0 until a real server listens. */
+  readonly webServerPort?: () => number
 }
 
 async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: Record<string, string> = {}, delivery: DeliveryMode = 'followup', allowResume = true, instanceId = 'test-instance', options: MountOptions = {}): Promise<{
@@ -240,7 +255,7 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
   const sources = new Map<string, MessageSource[]>()
   const methods = new Map<string, string[]>()
   if (options.webServer !== false) {
-    ctx.provide('webServer', fakeHttpServer(upgrades) as WebServer)
+    ctx.provide('webServer', fakeHttpServer(upgrades, options.webServerPort) as WebServer)
   }
   ctx.provide('agents', options.agents ?? fakeAgents(deliveries, liveIds, sources, methods))
   ctx.provide('credentials', fakeCredentials(token) as CredentialProvider)
@@ -2492,6 +2507,72 @@ describe('interconnect query-result answer validation', () => {
         wss.close((error) => { if (error === undefined) resolve(); else reject(error) })
       })
     }
+  })
+})
+
+describe('self peer origin', () => {
+  it('dials this instance once the host webserver reports a port and loops a send back', async () => {
+    const port = { current: 0 }
+    const instanceId = 'self-instance'
+    const mount = await mounted('secret', new Set(['R-sess']), { [instanceId]: 'self' }, 'followup', true, instanceId, { webServerPort: () => port.current })
+    // Before the webserver listens there is no origin to dial: the route is
+    // configured, reports the sentinel, and stays down.
+    expect(mount.service.peers()).toEqual([{ instanceId, origin: 'self', link: 'down' }])
+    const served = await serveUpgrade(mount.upgrades)
+    try {
+      port.current = served.port
+      await awaitLink(mount.service, instanceId, 5000)
+      expect(mount.service.peers()).toEqual([{
+        instanceId,
+        origin: `http://127.0.0.1:${String(served.port)}`,
+        link: 'up',
+      }])
+      const result = await mount.ctx.interconnect.send({ instanceId, sessionId: 'R-sess', text: 'loopback' })
+      expect(result).toEqual({ delivered: true, instance: instanceId, delivery: 'followup' })
+      expect(mount.deliveries.get('R-sess')).toEqual(['loopback'])
+    } finally {
+      await mount.dispose()
+      await served.close()
+    }
+  })
+
+  it('keeps a self peer down with a warning when the composition has no webserver', async () => {
+    const ctx = new Context()
+    ctx.provide('agents', fakeAgents(new Map(), new Set([SESSION_ID])))
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    // The warning comes from the reconnect dial, so the spy installs before
+    // the plugin so it catches the call whenever the backoff fires.
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'headless-self',
+      requestTimeoutMs: 10000,
+      peers: { 'headless-self': 'self' },
+    })
+    await fiber.await()
+    try {
+      expect(ctx.interconnect.peers()).toEqual([{ instanceId: 'headless-self', origin: 'self', link: 'down' }])
+      // The warning is deferred by one reconnect backoff so a browser boot
+      // (where listening starts within that window) does not log a transient
+      // failure; a profile that never gets a webserver does.
+      await waitUntil(() => warn.mock.calls.some(([line]) => String(line).includes('configured as self')), 3000)
+      expect(await ctx.interconnect.ping('headless-self')).toBeUndefined()
+    } finally {
+      warn.mockRestore()
+      await fiber.dispose()
+    }
+  })
+
+  it('rejects a self route keyed by an id this instance does not announce', async () => {
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer([]) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set()))
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'announced',
+      requestTimeoutMs: 10000,
+      peers: { alias: 'self' },
+    })
+    await expect(fiber.await()).rejects.toThrow(/key a self peer by the instanceId/)
   })
 })
 
