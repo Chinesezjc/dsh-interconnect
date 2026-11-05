@@ -54,27 +54,19 @@ import {
 } from './types.ts'
 
 /**
- * Mirror of the Host's subagent-ownership predicate. The Host keeps that rule in
- * `@deepseek-ai/dsh-api-session-controller`, whose package root exports it only
- * from the revision this plugin's merge introduces — the hosts this package is
- * installed on still resolve the older root, so importing it would fail at load.
- * The body is copied verbatim from the Host; keep it in sync if the Host changes
- * the rule, because this is a safety fence.
- * @param ctx - host context carrying the live agent registry.
- * @param session - attached or live session whose ownership is tested.
- * @param agent - live agent when one exists for the session.
+ * Mirror of the Host's subagent-ownership predicate. The Host moved live
+ * runtime ownership out of the agent registry, so the generic Session route
+ * now reserves only identities whose header says `origin: 'subagent'`; an
+ * ordinary fork that records a `parentSession` routes like any other Session.
+ * The body mirrors `hasApiSessionSubagentOwner` from
+ * `@deepseek-ai/dsh-api-session-controller`; it stays a local copy because the
+ * hosts this package is installed on may resolve a root that predates the
+ * export. Keep it in sync if the Host changes the rule: this is a safety fence.
+ * @param session - attached or live session whose origin is tested.
  * @returns whether subagent routing owns the session identity.
  */
-function isSessionOwnedBySubagent(
-  ctx: Context,
-  session: Pick<Session, 'header'>,
-  agent: Agent | undefined,
-): boolean {
-  if (session.header.origin === 'subagent') return true
-  const parentId = session.header.parentSession
-  if (parentId === undefined || agent === undefined) return false
-  const parent = ctx.agents.get(parentId)
-  return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
+function isSessionOwnedBySubagent(session: Pick<Session, 'header'>): boolean {
+  return session.header.origin === 'subagent'
 }
 
 /** Exhaustiveness guard for closed unions. */
@@ -900,7 +892,7 @@ export class InterconnectService extends Service {
     // refuse to deliver to must not be advertised as a target, or the listing
     // contradicts `send`.
     const reachable = this.ctx.agents.list()
-      .filter(agent => !isSessionOwnedBySubagent(this.ctx, agent.session, agent))
+      .filter(agent => !isSessionOwnedBySubagent(agent.session))
     const sessions: InterconnectSessionSummary[] = []
     let used = 0
     for (const agent of reachable.slice(0, MAX_LISTED_SESSIONS)) {
@@ -932,7 +924,11 @@ export class InterconnectService extends Service {
     let title: string | undefined
     try {
       const snapshot = this.ctx.get('sessionProjections')?.snapshot(agent.session)
-      const value = snapshot?.values.title
+      // The title key is contributed by the optional session-title projection
+      // package. This plugin does not depend on that package (a host may not
+      // ship it), so read the key structurally and validate its runtime type.
+      const values = snapshot?.values as { readonly title?: unknown } | undefined
+      const value = values?.title
       if (typeof value === 'string' && value !== '') title = value
     } catch {
       // A failing projection must not hide a reachable session.
@@ -1019,7 +1015,7 @@ export class InterconnectService extends Service {
     // it before handing out an agent, and a session this call just woke. A
     // session reserved to subagent routing is delivered to by its parent, so
     // splicing into its inbox here would race that parent.
-    if (isSessionOwnedBySubagent(this.ctx, agent.session, agent)) {
+    if (isSessionOwnedBySubagent(agent.session)) {
       return { delivered: false, instance: this.instanceId, reason: 'session-owned-by-subagent' }
     }
     // Remember who sent this message so the receiving session can reply later.
