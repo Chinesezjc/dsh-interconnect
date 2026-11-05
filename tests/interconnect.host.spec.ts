@@ -6,7 +6,7 @@ import { connect } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
-import type { WebServer, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import WebServer, { type WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -2533,6 +2533,40 @@ describe('self peer origin', () => {
     } finally {
       await mount.dispose()
       await served.close()
+    }
+  })
+
+  it('resolves the real webserver port and loops a send through its upgrade route', async () => {
+    // The fakes above pin the port contract; this case runs the actual
+    // WebServer with port 0, the configuration DSH Desktop starts with, so a
+    // regression in how the port is read cannot hide behind a fake getter.
+    const ctx = new Context()
+    const web = ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    await web.await()
+    const port = ctx.webServer.port
+    expect(port).toBeGreaterThan(0)
+    const deliveries = new Map<string, string[]>()
+    ctx.provide('agents', fakeAgents(deliveries, new Set(['R-sess'])))
+    ctx.provide('credentials', fakeCredentials('secret') as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, {
+      instanceId: 'real-self',
+      requestTimeoutMs: 5000,
+      peers: { 'real-self': 'self' },
+    })
+    await fiber.await()
+    try {
+      await awaitLink(ctx.interconnect, 'real-self', 5000)
+      expect(ctx.interconnect.peers()).toEqual([{
+        instanceId: 'real-self',
+        origin: `http://127.0.0.1:${String(port)}`,
+        link: 'up',
+      }])
+      const result = await ctx.interconnect.send({ instanceId: 'real-self', sessionId: 'R-sess', text: 'real loop' })
+      expect(result).toEqual({ delivered: true, instance: 'real-self', delivery: 'followup' })
+      expect(deliveries.get('R-sess')).toEqual(['real loop'])
+    } finally {
+      await fiber.dispose()
+      await web.dispose()
     }
   })
 

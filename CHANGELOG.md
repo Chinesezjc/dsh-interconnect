@@ -27,10 +27,11 @@
 
 ### 验证
 
-- `pnpm run check`：typecheck + 183/183 tests + build 全绿。新增 3 条用例：`self` 链路在端口出现
-  后自动转 up 并把 `send` 回环投递到本实例、headless 下保持 down 且 warn、键不等于 `instanceId`
-  时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，回环用例转红；删掉键约束，
-  第三条用例转红。
+- `pnpm run check`：typecheck + 184/184 tests + build 全绿。新增 4 条用例：`self` 链路在端口出现
+  后自动转 up 并把 `send` 回环投递到本实例；真实 `WebServer` 以 `port: 0` 启动（DSH Desktop
+  的启动参数）时解析出实际端口并经它的升级路由完成同一回环；headless 下保持 down 且 warn；
+  键不等于 `instanceId` 时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，
+  回环用例转红；删掉键约束，键用例转红。
 - 构建产物与 0.13.0（npm tarball）比对：**6 个变**（`lib/index.js`
   `b22a451fec9c2b0a`→`10a9f271d97eafdc`、`lib/interconnect/index.js`
   `ca649131b71ccdef`→`d87a442a91b50af3`、`lib/tool-interconnect/index.js`
