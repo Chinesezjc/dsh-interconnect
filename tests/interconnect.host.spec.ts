@@ -57,9 +57,9 @@ function fakeCredentials(token: string | undefined): Pick<CredentialProvider, 'r
 interface FakeAgentsOptions {
   /** Sessions reserved to subagent routing; their header carries `origin: 'subagent'`. */
   readonly subagentOwned?: ReadonlySet<string>
-  /** Session ids whose header records a `parentSession` (drives the ownership predicate's parent read). */
+  /** Session ids whose header records a `parentSession`: an ordinary fork, not a subagent-owned session. */
   readonly parentSessionOf?: Readonly<Record<string, string>>
-  /** Ids whose `get` throws, to exercise throwing ownership reads. */
+  /** Ids whose `get` throws, to exercise throwing agent reads. */
   readonly throwOnGet?: ReadonlySet<string>
   /** The value `get` throws for ids in `throwOnGet`; defaults to an Error. */
   readonly throwOnGetValue?: unknown
@@ -133,7 +133,6 @@ function fakeAgents(
         ...(options.noStatus === true ? {} : { status: 'idle' }),
       }) as unknown as Agent)
     },
-    isOwnedBy: () => false,
   }
 }
 
@@ -1086,6 +1085,22 @@ describe('interconnect delivery modes and wake', () => {
     await receiver.dispose()
   })
 
+  it('delivers to an ordinary session that records a parentSession', async () => {
+    const deliveries = new Map<string, string[]>()
+    const agents = fakeAgents(deliveries, new Set(['fork-sess']), undefined, undefined, {
+      parentSessionOf: { 'fork-sess': 'parent' },
+    })
+    const receiver = await mounted('secret', new Set(['fork-sess']), {}, 'followup', true, 'test-instance', { agents })
+    const frames = await deliverInbound(receiver.service, { kind: 'send', sessionId: 'fork-sess', text: 'fork hi' })
+    expect(deliveries.get('fork-sess')).toEqual(['fork hi'])
+    expect(frames).toContainEqual({
+      type: 'msg-result',
+      reqId: 'w-1',
+      result: { delivered: true, instance: 'test-instance', delivery: 'followup' },
+    })
+    await receiver.dispose()
+  })
+
   it('forwards delivery and resume overrides on an outbound send', async () => {
     const sender = await mounted('secret', new Set(['S-sess']), {}, 'followup', true, 'inst-send')
     const sServ = await serveUpgrade(sender.upgrades)
@@ -1202,21 +1217,25 @@ describe('interconnect delivery modes and wake', () => {
 })
 
 describe('interconnect session listing', () => {
-  it('filters subagent-owned sessions and omits absent title/status keys', async () => {
+  it('filters subagent-owned sessions and keeps an ordinary fork listed', async () => {
     const deliveries = new Map<string, string[]>()
     const agents = fakeAgents(
       deliveries,
-      new Set(['normal', 'sub-sess']),
+      new Set(['normal', 'sub-sess', 'fork-sess']),
       undefined,
       undefined,
-      { subagentOwned: new Set(['sub-sess']), noStatus: true },
+      {
+        subagentOwned: new Set(['sub-sess']),
+        parentSessionOf: { 'fork-sess': 'parent' },
+        noStatus: true,
+      },
     )
-    const receiver = await mounted('secret', new Set(['normal', 'sub-sess']), {}, 'followup', true, 'test-instance', { agents })
+    const receiver = await mounted('secret', new Set(['normal', 'sub-sess', 'fork-sess']), {}, 'followup', true, 'test-instance', { agents })
     const frames = await queryList(receiver.service)
     expect(frames).toContainEqual({
       type: 'query-result',
       reqId: 'list-1',
-      result: { instance: 'test-instance', sessions: [{ sessionId: 'normal' }] },
+      result: { instance: 'test-instance', sessions: [{ sessionId: 'normal' }, { sessionId: 'fork-sess' }] },
     })
     await receiver.dispose()
   })
@@ -1943,13 +1962,13 @@ describe('interconnect inbound frame handling on a fake socket', () => {
       new Set(['boom-sess']),
       undefined,
       undefined,
-      { parentSessionOf: { 'boom-sess': 'parent-boom' }, throwOnGet: new Set(['parent-boom']) },
+      { throwOnGet: new Set(['boom-sess']) },
     )
     const receiver = await mounted('secret', new Set(['boom-sess']), {}, 'followup', true, 'test-instance', { agents })
     const { socket, handlers } = fakeSocket()
     attachSocket(receiver.service, socket)
-    // A parent-session lookup that throws makes the ownership predicate throw
-    // inside deliver(); the frame handler must answer unreachable, not crash.
+    // A throwing agent read inside deliver() must make the frame handler answer
+    // unreachable, not crash.
     handlers.get('message')!(JSON.stringify({ type: 'msg', reqId: 'm-1', message: { kind: 'send', sessionId: 'boom-sess', text: 'hi' } }))
     await wait(30)
     expect(socket.sent).toContain(JSON.stringify({
@@ -2303,8 +2322,7 @@ describe('interconnect inbound reply frames and socket liveness', () => {
   it('renders a non-Error msg handler failure as a string', async () => {
     const deliveries = new Map<string, string[]>()
     const agents = fakeAgents(deliveries, new Set(['boom-sess']), undefined, undefined, {
-      parentSessionOf: { 'boom-sess': 'parent-boom' },
-      throwOnGet: new Set(['parent-boom']),
+      throwOnGet: new Set(['boom-sess']),
       throwOnGetValue: 'plain-string-boom',
     })
     const receiver = await mounted('secret', new Set(['boom-sess']), {}, 'followup', true, 'test-instance', { agents })

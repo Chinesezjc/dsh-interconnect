@@ -26,9 +26,6 @@ importers:
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:../dsh/packages/host/webserver
         version: link:../dsh/packages/host/webserver
-      '@deepseek-ai/dsh-invariants':
-        specifier: link:../dsh/packages/runtime-diagnostics/invariants
-        version: link:../dsh/packages/runtime-diagnostics/invariants
       '@deepseek-ai/dsh-llm':
         specifier: link:../dsh/packages/llm/llm
         version: link:../dsh/packages/llm/llm

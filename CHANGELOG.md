@@ -2,7 +2,7 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
-## 0.14.0（2026-11-05）
+## 0.15.0（2026-11-05）
 
 支持同实例自指 peer：`peers` 的值可以写成字面量 `self`，拨号时用宿主 webserver 当前监听的端口
 拼出 `http://127.0.0.1:<port>`。DSH Desktop 的宿主以 `--port 0` 启动，Web 端口每次启动由操作
@@ -27,7 +27,7 @@
 
 ### 验证
 
-- `pnpm run check`：typecheck + 184/184 tests + build 全绿。新增 4 条用例：`self` 链路在端口出现
+- `pnpm run check`：typecheck + 185/185 tests + build 全绿。新增 4 条用例：`self` 链路在端口出现
   后自动转 up 并把 `send` 回环投递到本实例；真实 `WebServer` 以 `port: 0` 启动（DSH Desktop
   的启动参数）时解析出实际端口并经它的升级路由完成同一回环；headless 下保持 down 且 warn；
   键不等于 `instanceId` 时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，
@@ -43,6 +43,53 @@
   `tool-interconnect` 的 bundle 内联了服务实现，所以它也随本次服务改动变化；三个 JS bundle 里
   来自 sibling checkout 的 source path 注释随构建目录变化，不属于行为差异（HEAD 在临时
   worktree 里构建后逐行核对，差异只有这些路径注释与本次服务改动）。
+## 0.14.0（2026-11-05）
+
+适配公开 DSH 0.2.x 的破坏性变化，让 `pnpm run check` 重新对
+`deepseek-ai/deepseek-harness` master 通过。仓库 CI 自 2026-10-23 的 main 推送起为红，但上游的
+实际断点更早，且分成三次：
+
+1. **2026-09-30**：`f028f25667db` 删除 runtime invariant 插件与 `@deepseek-ai/dsh-invariants`
+   （0.2.0-rc.2 的 remove-runtime-invariants 升级项）。本包三个 `./invariant` companion 因此
+   无法解析。
+2. **2026-10-15**：`ff731c72dee9` 重构 session projection 类型，title key 改由可选的
+   session-title 包做类型合并；本包没有导入该包，`snapshot.values.title` 不再可见。
+3. **2026-10-23**：`b3d4933f39ff` 把 subagent live lineage 移出 agent registry（0.2.1-rc.3），
+   删除 `AgentRegistry.isOwnedBy`；本包的所有权谓词继续调用它，会在有 `parentSession` 的投递上
+   抛错。
+
+最后一次绿 CI 是 2026-09-24（当时公开 master 还是 0.1.7-rc.2 时期）；09-24 到 10-23 之间没有
+main 推送，所以第一次红灯出现在 10-23。普通 session 的收发在第三项之前仍然可用，这也解释了
+线上 0.13.0 的问题报告为什么没有暴露这些差异。
+
+### 变更
+
+- **移除 runtime invariant companion**：删除 `src/interconnect/invariant.ts`、
+  `src/tool-interconnect/invariant.ts`、`src/skill-interconnect/invariant.ts`，以及
+  `./skill-interconnect/invariant` 导出和对应构建项。公开 DSH 已删除整个 invariants 运行时；
+  其中唯一对外导出的 skill companion 本来就是 no-op，功能不受影响。
+- **subagent 所有权谓词对齐新 Host**：`isSessionOwnedBySubagent` 只判断
+  `session.header.origin === 'subagent'`。0.2.1-rc.3 起普通 fork（有 `parentSession`、origin 不是
+  subagent）按普通 session 投递与列出；旧实现里的 parent 查找和 `isOwnedBy` 一并删除。
+- **title projection 结构化读取**：title 由可选的 session-title 包贡献类型，本包不再依赖该类型；
+  改为按运行时字段读取并保留 `typeof string` 校验。没有该服务的 host 继续降级为无标题行。
+- **依赖与打包**：移除 `@deepseek-ai/dsh-invariants` 的 peer/dev 依赖和 `./skill-interconnect/
+  invariant` 导出；`lib/*/invariant.js` 不再产出。
+- **文档**：README 的 subagent 段落改为新规则，并说明 parent-owned 普通 fork 可投递。
+
+### 验证
+
+- 对公开 `deepseek-ai/deepseek-harness` master（0.2.2-rc.1）本地跑 `pnpm run check`：
+  typecheck + 181/181 tests + build 全绿。
+- 新增/改写用例：普通 fork（`parentSession`、非 subagent origin）出现在 `interconnect_list` 中并
+  可投递；origin=subagent 仍被列出过滤并返回 `session-owned-by-subagent`；throwing agent read
+  仍走 unreachable/日志路径。负例已实测：把谓词改回「有 parentSession 即封栏」，两条新用例转红。
+- 构建产物与 0.13.0（npm tarball）比对：`lib/index.js`
+  `b22a451fec9c2b0a`→`6a0c58c78cc7dc76`、`lib/interconnect/index.js`
+  `ca649131b71ccdef`→`31f77d024329f6cc`、`lib/tool-interconnect/index.js`
+  `5db250e043e929d9`→`670d89a64b6f1cc0`；`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）与 `cordis.patch.yml`（`b324e2a6f00f7515`）逐字节不变；
+  `lib/types/interconnect/{index,types}.d.ts` 也不变。
 
 ## 0.13.0（2026-10-23）
 
