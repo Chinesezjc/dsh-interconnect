@@ -27,22 +27,21 @@
 
 ### 验证
 
-- `pnpm run check`：typecheck + 185/185 tests + build 全绿。新增 4 条用例：`self` 链路在端口出现
+- 对公开 `deepseek-ai/deepseek-harness` master（0.2.2-rc.1）分别跑 typecheck、185/185 tests、
+  build，全部通过。新增 4 条用例：`self` 链路在端口出现
   后自动转 up 并把 `send` 回环投递到本实例；真实 `WebServer` 以 `port: 0` 启动（DSH Desktop
   的启动参数）时解析出实际端口并经它的升级路由完成同一回环；headless 下保持 down 且 warn；
   键不等于 `instanceId` 时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，
   回环用例转红；删掉键约束，键用例转红。
-- 构建产物与 0.13.0（npm tarball）比对：**6 个变**（`lib/index.js`
-  `b22a451fec9c2b0a`→`1e1596299a3a0b10`、`lib/interconnect/index.js`
-  `ca649131b71ccdef`→`d38b52f1c18081b6`、`lib/tool-interconnect/index.js`
-  `5db250e043e929d9`→`bd74e499343bb59a`、`lib/types/interconnect/index.d.ts`
-  `d787ab1bbf38f389`→`01570872680e9366`、`lib/types/interconnect/types.d.ts`
-  `e8d115c866d70f3e`→`f744594e8b77f76f`、`dsh.plugin.json`
-  `8e0230f68a04de22`→`7410df8e335fb673`）。`lib/interconnect/invariant.js`、
-  `lib/tool-interconnect/invariant.js`、`lib/skill-interconnect/*`、`cordis.patch.yml` 逐字节不变。
-  `tool-interconnect` 的 bundle 内联了服务实现，所以它也随本次服务改动变化；三个 JS bundle 里
-  来自 sibling checkout 的 source path 注释随构建目录变化，不属于行为差异（HEAD 在临时
-  worktree 里构建后逐行核对，差异只有这些路径注释与本次服务改动）。
+- 构建产物与 0.14.0 比对：**4 个变**（`lib/index.js`
+  `6a0c58c78cc7dc76`→`808e57440ea165e1`、`lib/interconnect/index.js`
+  `31f77d024329f6cc`→`f4bd9244fd4508db`、`lib/tool-interconnect/index.js`
+  `670d89a64b6f1cc0`→`df5ac78622d29d87`、`dsh.plugin.json`
+  `7410df8e335fb673`→`b146fd7f295fa07e`）。`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）、`cordis.patch.yml`（`b324e2a6f00f7515`）与
+  `lib/types/interconnect/{index,types}.d.ts` 逐字节不变。`tool-interconnect` 的 bundle 内联了
+  服务实现，所以它也随本次服务改动变化。
+
 ## 0.14.0（2026-11-05）
 
 适配公开 DSH 0.2.x 的破坏性变化，让 `pnpm run check` 重新对
