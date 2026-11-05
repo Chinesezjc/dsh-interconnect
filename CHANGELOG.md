@@ -33,9 +33,9 @@
   键不等于 `instanceId` 时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，
   回环用例转红；删掉键约束，键用例转红。
 - 构建产物与 0.13.0（npm tarball）比对：**6 个变**（`lib/index.js`
-  `b22a451fec9c2b0a`→`10a9f271d97eafdc`、`lib/interconnect/index.js`
-  `ca649131b71ccdef`→`d87a442a91b50af3`、`lib/tool-interconnect/index.js`
-  `5db250e043e929d9`→`2fa36a31a1398608`、`lib/types/interconnect/index.d.ts`
+  `b22a451fec9c2b0a`→`1e1596299a3a0b10`、`lib/interconnect/index.js`
+  `ca649131b71ccdef`→`d38b52f1c18081b6`、`lib/tool-interconnect/index.js`
+  `5db250e043e929d9`→`bd74e499343bb59a`、`lib/types/interconnect/index.d.ts`
   `d787ab1bbf38f389`→`01570872680e9366`、`lib/types/interconnect/types.d.ts`
   `e8d115c866d70f3e`→`f744594e8b77f76f`、`dsh.plugin.json`
   `8e0230f68a04de22`→`7410df8e335fb673`）。`lib/interconnect/invariant.js`、
