@@ -164,10 +164,11 @@ interconnect_reply(text="reply")
 `interconnect_send` 不会往 subagent 拥有的 session 里投递，`interconnect_list` 也不会把它们
 列出来。那类 session 的投递权属于它的父 agent，从这里 splice 进 inbox 会和父 agent 抢。判定
 逻辑镜像 Host 的 `hasApiSessionSubagentOwner`（`@deepseek-ai/dsh-api-session-controller`）：
-Host 在 0.6 之后把这个谓词从 `@deepseek-ai/dsh-api-remotes` 移走，且没有公开导出——桌面端和
-`npx @deepseek-ai/dsh web` 运行时里没有任何可 import 的 Host 绑定，所以这里逐字复制一份
-（`isSessionOwnedBySubagent`，见 `src/interconnect/index.ts`）。这是安全规则，Host 改动该规则
-时必须同步此副本；tests 覆盖 origin=subagent 与 parent-owned 两条封栏分支。
+0.2.1-rc.3 起 Host 把 live runtime ownership 移出了 agent registry，通用 Session 路由只保留
+header 里 `origin: 'subagent'` 的身份；普通 fork 即使记了 `parentSession` 也按普通 Session
+处理。谓词在插件内保留一份镜像（`isSessionOwnedBySubagent`，见 `src/interconnect/index.ts`），
+因为已安装的 host 可能解析到早于该导出的 root。这是安全规则，Host 改动时必须同步此副本；
+tests 覆盖 origin=subagent 封栏与 parent-owned 普通 fork 可投递两条分支。
 
 已实测：起一个真实 subagent 后，`interconnect_list` 不包含它；直接 `send` 到它的 id 返回
 `session-owned-by-subagent`，消息**没有**进入 inbox。
@@ -405,8 +406,8 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 179/179 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、本机原因不得从线缆上来的负例等回归用例）；
-  类型检查、构建均干净。
+- 181/181 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、subagent 封栏与 parent-owned 普通 fork 可投递、本机原因不得从线缆上来的负例等回归用例）；
+  类型检查、构建均干净；对公开 DSH master（0.2.2-rc.1）验证。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。
 - CI（GitHub Actions）：clone 公开 DSH 仓库作为 sibling，跑 `pnpm run check`。
