@@ -379,6 +379,93 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'interconnect_doctor',
+    description: 'Diagnose this instance\'s interconnect setup without dialing a peer: report whether '
+      + 'the shared token resolves, whether the host webserver is listening, every configured peer and '
+      + 'its current link state, the last dial error and retry timing, and actionable next steps. '
+      + 'Use this before reporting a connection problem, or when a self peer stays down or a peer is '
+      + 'configured but unreachable.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          instanceId: { type: 'string', required: true },
+          token: { type: 'string', required: true },
+          webServer: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              available: { type: 'boolean', required: true },
+              port: { type: 'number' },
+            },
+          },
+          requestTimeoutMs: { type: 'number', required: true },
+          delivery: { type: 'string', required: true },
+          allowResume: { type: 'boolean', required: true },
+          peers: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                instanceId: { type: 'string', required: true },
+                origin: { type: 'string', required: true },
+                link: { type: 'string', required: true },
+                kind: { type: 'string', required: true },
+                lastError: { type: 'string' },
+                lastAttemptAt: { type: 'number' },
+                lastOpenAt: { type: 'number' },
+                retries: { type: 'number', required: true },
+                nextRetryAt: { type: 'number' },
+              },
+            },
+          },
+          hints: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => {
+        const lines: string[] = [
+          value.ok ? 'interconnect doctor: OK' : 'interconnect doctor: issues found',
+          `instance: ${value.instanceId}`,
+          `token: ${value.token}`,
+          `web server: ${value.webServer.available ? `127.0.0.1:${String(value.webServer.port)}` : 'not listening (headless)'}`,
+          `config: requestTimeoutMs=${String(value.requestTimeoutMs)}, delivery=${value.delivery}, allowResume=${String(value.allowResume)}`,
+        ]
+        const peers = value.peers ?? []
+        if (peers.length === 0) {
+          lines.push('peers: none')
+        } else {
+          lines.push('peers:')
+          for (const peer of peers) {
+            lines.push(`  ${peer.instanceId}  ${peer.kind}  ${peer.origin}  [${peer.link}]`)
+            const details: string[] = []
+            if (peer.lastError !== undefined) details.push(`last error: ${peer.lastError}`)
+            if (peer.lastOpenAt !== undefined) details.push(`last open: ${new Date(peer.lastOpenAt).toISOString()}`)
+            if (peer.retries > 0) details.push(`retries: ${String(peer.retries)}`)
+            if (peer.nextRetryAt !== undefined) details.push(`next retry: ${new Date(peer.nextRetryAt).toISOString()}`)
+            if (details.length > 0) lines.push(`    ${details.join('; ')}`)
+          }
+        }
+        const hints = value.hints ?? []
+        if (hints.length > 0) {
+          lines.push('hints:')
+          for (const hint of hints) lines.push(`  - ${hint}`)
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(_args, exec) {
+      // Diagnosis reads local state and one credential; the token read can
+      // await a credential provider, so it races the caller's cancellation.
+      return raceSignal(exec.signal, interconnect.diagnose())
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'interconnect_reply',
     description: 'Deliver one text message back to the peer that this session last received an '
       + 'interconnect message from. Only the reply text is needed: the replying session is this '

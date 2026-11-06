@@ -16,6 +16,11 @@ Your job is to pick the right peer, the right tool, and the right target.
   `instanceId` argument for the tools below. A peer shown with link `down` is
   configured but currently cannot carry frames, so it answers nothing until it
   reconnects.
+- `interconnect_doctor` — read-only diagnosis of this instance: token presence,
+  webserver state, every peer's link, last dial error, retry count and next
+  retry, plus actionable hints. Call it when a peer is unreachable or a `self`
+  peer stays down. It does not dial a peer, so it cannot replace
+  `interconnect_ping`.
 - `interconnect_list` — discover which sessions are live on a peer instance.
   Every returned `sessionId` is a valid `interconnect_send` target at that
   moment. Use this first when you do not already know the target session id.
@@ -57,6 +62,17 @@ addresses.
    `interconnect_reply(text=...)`. The replying session is this agent's own
    session, and the recorded sender is used as the destination; that sender is
    woken by default when it is no longer live.
+
+## Troubleshooting
+
+- If every peer is down, or a `self` peer stays down, call
+  `interconnect_doctor` and report its `hints` instead of guessing.
+- `token: missing` means the shared credential is not configured; `web server:
+  not listening` means `self` routes cannot resolve. Do not work around either
+  by choosing a different peer id or session.
+- A down fixed peer is still configured; its reconnect runs on its own backoff.
+  Doctor shows the last error and the next retry time. Retrying a send after
+  that may succeed; do not silently re-address the message.
 
 ## Addressing rules
 
