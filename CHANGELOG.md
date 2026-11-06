@@ -33,16 +33,19 @@
   的启动参数）时解析出实际端口并经它的升级路由完成同一回环；headless 下保持 down 且 warn；
   键不等于 `instanceId` 时激活失败。负例均已实测：把 `selfOrigin()` 改成永远返回 undefined，
   回环用例转红；删掉键约束，键用例转红。
-- 构建产物与 0.14.0 比对：**4 个变**（`lib/index.js`
-  `6a0c58c78cc7dc76`→`808e57440ea165e1`、`lib/interconnect/index.js`
-  `31f77d024329f6cc`→`f4bd9244fd4508db`、`lib/tool-interconnect/index.js`
-  `670d89a64b6f1cc0`→`df5ac78622d29d87`、`dsh.plugin.json`
-  `7410df8e335fb673`→`b146fd7f295fa07e`）。`lib/skill-interconnect/index.js`
-  （`f3503a044b6791e9`）、`cordis.patch.yml`（`b324e2a6f00f7515`）与
-  `lib/types/interconnect/{index,types}.d.ts` 逐字节不变。`tool-interconnect` 的 bundle 内联了
-  服务实现，所以它也随本次服务改动变化。
+- 构建产物与最后发布的 0.13.0（npm tarball）比对：**6 个变**（`lib/index.js`
+  `b22a451fec9c2b0a`→`31f0b5973e28622c`、`lib/interconnect/index.js`
+  `ca649131b71ccdef`→`50bc07b205b4dd51`、`lib/tool-interconnect/index.js`
+  `5db250e043e929d9`→`87241fd961991ad8`、`lib/types/interconnect/index.d.ts`
+  `d787ab1bbf38f389`→`01570872680e9366`、`lib/types/interconnect/types.d.ts`
+  `e8d115c866d70f3e`→`f744594e8b77f76f`、`dsh.plugin.json`
+  `8e0230f68a04de22`→`b146fd7f295fa07e`）。`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）与 `cordis.patch.yml`（`b324e2a6f00f7515`）逐字节不变。
+  `tool-interconnect` 的 bundle 内联了服务实现，所以它也随服务改动变化。
 
 ## 0.14.0（2026-11-05）
+
+本版本作为兼容基线合并进 main，未单独发布到 npm；0.15.0 包含它的全部改动。
 
 适配公开 DSH 0.2.x 的破坏性变化，让 `pnpm run check` 重新对
 `deepseek-ai/deepseek-harness` master 通过。仓库 CI 自 2026-10-23 的 main 推送起为红，但上游的
