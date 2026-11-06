@@ -23,6 +23,8 @@
   解析出的 `http://127.0.0.1:<port>`。
 - **文档**：README 新增「同一实例内两个会话互通（`self`）」，配置表与 headless 说明同步；
   `Config.peers` 与 `PeerStatus.origin` 的 JSDoc 写明哨兵与解析规则。
+- **构建清理**：`build.mjs` 在构建前删除 `lib/`，避免已移除的 invariant 产物继续被
+  `files: ["lib"]` 打进发布 tarball。
 - **线缆协议不变**：没有增删任何帧字段；`self` 只是本机的配置写法，对端看到的仍是普通 WS 链路。
 
 ### 验证

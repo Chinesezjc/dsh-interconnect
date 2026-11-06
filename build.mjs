@@ -5,10 +5,13 @@
  * the Loader validates Config against it.
  */
 import { build } from 'esbuild'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+// Build into a clean tree: an entry removed from this list must not survive as
+// a stale file that `files: ["lib"]` would publish.
+rmSync('lib', { recursive: true, force: true })
 mkdirSync('lib', { recursive: true })
 
 // `ws` is a peer-provided CommonJS package; keep it external alongside the
