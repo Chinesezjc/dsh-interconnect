@@ -307,6 +307,59 @@ export interface PeerStatus {
   readonly link: PeerLinkState
 }
 
+/** Whether a configured route dials a fixed origin or this instance's own webserver. */
+export type PeerRouteKind = 'fixed' | 'self'
+
+/**
+ * One peer's diagnostic row: the route and link state from {@link PeerStatus},
+ * plus the last dial result. Timestamps are epoch milliseconds and exist only
+ * for local diagnosis; they never cross the wire.
+ */
+export interface PeerDiagnosis extends PeerStatus {
+  /** `self` when the route resolves from this instance's webserver, `fixed` otherwise. */
+  readonly kind: PeerRouteKind
+  /** Last dial/connect failure, cleared when the link next opens. */
+  readonly lastError?: string
+  /** When the most recent dial attempt started. */
+  readonly lastAttemptAt?: number
+  /** When the link last opened successfully. */
+  readonly lastOpenAt?: number
+  /** Consecutive reconnect attempts since the last successful open. */
+  readonly retries: number
+  /** When the next reconnect is scheduled, if one is pending. */
+  readonly nextRetryAt?: number
+}
+
+/**
+ * Local diagnosis returned by `InterconnectService.diagnose()` and rendered by
+ * the `interconnect_doctor` tool. It reads local configuration and link state;
+ * it never probes a peer and never exposes the shared token.
+ */
+export interface InterconnectDiagnosis {
+  /** This instance's configured id. */
+  readonly instanceId: string
+  /** Whether the shared credential resolves; `error` means the read itself threw. */
+  readonly token: 'configured' | 'missing' | 'error'
+  /** The host webserver's listening state, which `self` routes depend on. */
+  readonly webServer: {
+    readonly available: boolean
+    /** The resolved listening port when available. */
+    readonly port?: number
+  }
+  /** Configured outbound request timeout, in milliseconds. */
+  readonly requestTimeoutMs: number
+  /** Default inbound delivery mode. */
+  readonly delivery: DeliveryMode
+  /** Whether this instance honours a sender's resume request. */
+  readonly allowResume: boolean
+  /** One row per configured peer, in configuration order. */
+  readonly peers: PeerDiagnosis[]
+  /** Actionable next steps; empty problems produce one positive line. */
+  readonly hints: string[]
+  /** Whether the token resolves and every configured peer link is up. */
+  readonly ok: boolean
+}
+
 /** Service config bound by the Composition loader. */
 export interface Config {
   /**

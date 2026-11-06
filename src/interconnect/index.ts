@@ -41,6 +41,8 @@ import {
   type LinkFrame,
   type LinkMessage,
   type ListResult,
+  type PeerDiagnosis,
+  type PeerRouteKind,
   type PeerStatus,
   type PingResult,
   type QueryMessage,
@@ -50,6 +52,7 @@ import {
   type SendRequest,
   type SendFailure,
   type SenderIdentity,
+  type InterconnectDiagnosis,
   type InterconnectSessionSummary,
 } from './types.ts'
 
@@ -422,7 +425,8 @@ export class InterconnectService extends Service {
     // webserver starts (or changed by a restart) needs no config update.
     /* v8 ignore next 1 -- the Config schema applies its peers default before the constructor runs. */
     for (const [peerInstanceId, origin] of Object.entries(config.peers ?? {})) {
-      this.link(peerInstanceId, origin === SELF_PEER_ORIGIN ? () => this.selfOrigin() : origin)
+      const self = origin === SELF_PEER_ORIGIN
+      this.link(peerInstanceId, self ? () => this.selfOrigin() : origin, self ? 'self' : 'fixed')
     }
 
     const upgrade: WebUpgradeRoute = {
@@ -642,6 +646,66 @@ export class InterconnectService extends Service {
   }
 
   /**
+   * Local diagnosis for the `interconnect_doctor` tool: configuration, token
+   * presence, webserver state, per-peer link details, and actionable hints.
+   * Read-only: it never dials a peer and never returns the token value.
+   * @returns the current local diagnosis.
+   */
+  async diagnose(): Promise<InterconnectDiagnosis> {
+    let token: InterconnectDiagnosis['token'] = 'configured'
+    let tokenError: string | undefined
+    try {
+      if (await this.resolveToken() === undefined) token = 'missing'
+    } catch (error) {
+      token = 'error'
+      tokenError = error instanceof Error ? error.message : String(error)
+    }
+    const server = this.ctx.get('webServer')
+    const port = server?.port
+    const webServer = typeof port === 'number' && port > 0
+      ? { available: true, port }
+      : { available: false }
+    const peers: PeerDiagnosis[] = [...this.linkStates].map(([instanceId, state]) => ({
+      instanceId,
+      origin: state.peer,
+      link: state.writable() ? 'up' : 'down',
+      kind: state.kind,
+      ...state.diagnostics(),
+    }))
+    const hints: string[] = []
+    if (token === 'missing') {
+      hints.push('DSH_INTERCONNECT_TOKEN is not configured: outbound dials stay down and inbound upgrades are refused. Set the same token on both sides.')
+    } else if (token === 'error') {
+      hints.push(`the credential store rejected the token read${tokenError === undefined ? '' : `: ${tokenError}`}; check the credential provider.`)
+    }
+    if (peers.length === 0) {
+      hints.push('no peers configured: this instance can receive messages but cannot send or reply. Add a peer origin, or `self` for this instance.')
+    }
+    for (const peer of peers) {
+      if (peer.kind === 'self' && !webServer.available) {
+        hints.push(`peer "${peer.instanceId}" is a self route but this instance has no listening webServer; use a web profile or a fixed origin.`)
+      } else if (peer.link === 'down') {
+        const detail = peer.lastError === undefined ? '' : `: ${peer.lastError}`
+        hints.push(`peer "${peer.instanceId}" is down${detail}; check its origin, the peer process, and that both sides share the same token.`)
+      }
+    }
+    if (hints.length === 0) {
+      hints.push('no problems found: the token is configured and every configured peer link is up.')
+    }
+    return {
+      instanceId: this.instanceId,
+      token,
+      webServer,
+      requestTimeoutMs: this.requestTimeoutMs,
+      delivery: this.delivery,
+      allowResume: this.allowResume,
+      peers,
+      hints,
+      ok: token === 'configured' && peers.every(peer => peer.link === 'up'),
+    }
+  }
+
+  /**
    * Send a `msg` frame over the live link to a peer and resolve with its
    * correlated `msg-result`. A `peer-not-configured` result when this instance
    * configures no route for that id, undefined when the route exists but its
@@ -747,14 +811,17 @@ export class InterconnectService extends Service {
    * @param instanceId - the peer's `instanceId`.
    * @param origin - receiver origin this instance dials (e.g.
    *   `http://127.0.0.1:13080`), or a resolver for a `self` route.
+   * @param kind - `self` for a route resolved from this instance's webserver,
+   *   `fixed` for a configured origin.
    */
-  private link(instanceId: string, origin: PeerOrigin): void {
+  private link(instanceId: string, origin: PeerOrigin, kind: PeerRouteKind = 'fixed'): void {
     const state = new LinkState(
       (socket) => { this.attachDialedSocket(socket, instanceId) },
       this.ctx.logger,
       () => this.resolveToken(),
       instanceId,
       typeof origin === 'string' ? trimBase(origin) : origin,
+      kind,
     )
     this.linkStates.set(instanceId, state)
     state.dial()
@@ -1360,7 +1427,7 @@ interface DialedSocket {
   socket: WebSocket
   open: () => void
   close: () => void
-  error: () => void
+  error: (error: Error) => void
 }
 
 /**
@@ -1381,8 +1448,13 @@ class LinkState {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private warnedNoToken = false
   private warnedNoOrigin = false
+  private lastError: string | undefined
+  private lastAttemptAt: number | undefined
+  private lastOpenAt: number | undefined
+  private nextRetryAt: number | undefined
 
   readonly instanceId: string
+  readonly kind: PeerRouteKind
   private readonly origin: PeerOrigin
 
   constructor(
@@ -1391,8 +1463,10 @@ class LinkState {
     private readonly resolveToken: () => Promise<string | undefined>,
     instanceId: string,
     origin: PeerOrigin,
+    kind: PeerRouteKind,
   ) {
     this.instanceId = instanceId
+    this.kind = kind
     this.origin = origin
   }
 
@@ -1405,6 +1479,7 @@ class LinkState {
   dial(): void {
     /* v8 ignore next 1 -- close() removes the link state from the map before any later dial can observe it. */
     if (this.closed) return
+    this.lastAttemptAt = Date.now()
     const origin = typeof this.origin === 'string' ? this.origin : this.origin()
     if (origin === undefined) {
       // A self route needs the host webserver's listening port, which can
@@ -1419,6 +1494,7 @@ class LinkState {
           `interconnect: peer ${this.instanceId} is configured as self but this instance has no listening webServer port yet; the link stays down and retries`,
         )
       }
+      this.lastError = 'no listening webServer port'
       this.scheduleReconnect()
       return
     }
@@ -1432,6 +1508,7 @@ class LinkState {
       // or from a host webserver reporting an unusable port; it degrades to a
       // down link rather than a thrown dial.
       this.logger.warn(`interconnect: invalid peer origin ${origin}; link to ${this.instanceId} stays down`)
+      this.lastError = `invalid peer origin: ${origin}`
       return
     }
     void this.resolveToken().then((token) => {
@@ -1444,6 +1521,7 @@ class LinkState {
           this.logger.warn(`interconnect: no shared token configured; peer ${this.instanceId} link stays down, retrying until one is set`)
         }
         if (this.closed) return
+        this.lastError = 'no shared token configured'
         this.scheduleReconnect()
         return
       }
@@ -1460,6 +1538,8 @@ class LinkState {
       })
       const onOpen = (): void => {
         this.retry = 0
+        this.lastOpenAt = Date.now()
+        this.lastError = undefined
         // Same handler as the server half: adds to the live pool and announces
         // this instance's identity over the now-open link.
         this.attachSocket(socket)
@@ -1467,21 +1547,24 @@ class LinkState {
       const onClose = (): void => {
         /* v8 ignore next 1 -- close() strips this listener before terminating, so the guard is only reachable on real drops. */
         if (this.closed) return
+        if (this.lastError === undefined) this.lastError = 'link closed'
         this.scheduleReconnect()
       }
-      const onError = (): void => {
+      const onError = (error: Error): void => {
         // close follows; reconnect is scheduled there.
+        this.lastError = error.message.length === 0 ? 'socket error' : error.message
       }
       this.dialed = { socket, open: onOpen, close: onClose, error: onError }
       socket.once('open', onOpen)
       socket.once('close', onClose)
       socket.on('error', onError)
-    }).catch(() => {
+    }).catch((error: unknown) => {
       // A rejecting token read must not become an unhandled rejection, and must
       // not silently end the dial loop either: without this the link would stay
       // down until the process restarted, since no socket was ever created and
       // so no `close` will arrive to schedule the retry.
       if (this.closed) return
+      this.lastError = `credential read failed: ${error instanceof Error ? error.message : String(error)}`
       this.scheduleReconnect()
     })
   }
@@ -1490,6 +1573,23 @@ class LinkState {
   writable(): boolean {
     const dialed = this.dialed
     return dialed !== undefined && dialed.socket.readyState === WebSocket.OPEN
+  }
+
+  /** Local dial state for `diagnose()`; no socket content or token is exposed. */
+  diagnostics(): {
+    lastError?: string
+    lastAttemptAt?: number
+    lastOpenAt?: number
+    retries: number
+    nextRetryAt?: number
+  } {
+    return {
+      ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
+      ...(this.lastAttemptAt === undefined ? {} : { lastAttemptAt: this.lastAttemptAt }),
+      ...(this.lastOpenAt === undefined ? {} : { lastOpenAt: this.lastOpenAt }),
+      retries: this.retry,
+      ...(this.nextRetryAt === undefined ? {} : { nextRetryAt: this.nextRetryAt }),
+    }
   }
 
   /** Write one frame over this link's outbound socket; false when not open. */
@@ -1523,8 +1623,10 @@ class LinkState {
     /* v8 ignore next 1 -- the 30s cap binds only after five consecutive reconnect failures (~31s of wall time). */
     const delay = Math.min(30000, 1000 * 2 ** this.retry)
     this.retry += 1
+    this.nextRetryAt = Date.now() + delay
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
+      this.nextRetryAt = undefined
       this.dial()
     }, delay)
   }

@@ -19,6 +19,8 @@
 
 - `interconnect_peers`：列出本实例**已配置**的对端及其拨号链路状态（`up`/`down`），用于在不知道
   peer id 时先看有哪些可用目标，也是区分「没配这个 peer」与「配了但链路不通」的唯一入口
+- `interconnect_doctor`：只读诊断：共享 token 是否解析、宿主 webserver 是否监听、每个 peer 的
+  链路/最后错误/重试时间，以及可直接执行的下一步；不主动拨号
 - `interconnect_send`：向对端实例的指定 session 投递消息；默认唤醒没有 live agent 的持久 session（`resume: false` 关闭），可选 `delivery` 选投递模式
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
@@ -26,7 +28,7 @@
 
 **`skill-interconnect`** —— 配套 skill：
 
-- 向模型注册 `dsh-interconnect` skill，说明 `peers`/`list`/`ping`/`send`/`reply` 的完整用法、
+- 向模型注册 `dsh-interconnect` skill，说明 `peers`/`doctor`/`list`/`ping`/`send`/`reply` 的完整用法、
   投递模式、`resume` 唤醒语义与失败处理。
 - 明确告知模型：`interconnect_send` 会自动注入发送方的 `instanceId` 和 `sessionId`，
   接收方凭记录的 sender 即可用 `interconnect_reply` 回信，不需要手工传地址。
@@ -60,6 +62,31 @@ peer-b  http://127.0.0.1:13081  [down]
 
 `up`/`down` 是**拨号链路**当前是否可用；`down` 不代表对端没开——重连按指数退避自己跑，改完
 网络或对端重启后无需重启本实例，链路会自己回来。
+
+### 诊断（`interconnect_doctor`）
+
+链路 `down` 时先调用 `interconnect_doctor`；它只读本地状态，不会拨号：
+
+```
+interconnect doctor: issues found
+instance: mac
+token: configured
+web server: 127.0.0.1:3080
+config: requestTimeoutMs=10000, delivery=followup, allowResume=true
+peers:
+  mac  self  http://127.0.0.1:3080  [up]
+  momoairi  fixed  http://127.0.0.1:13084  [down]
+    last error: connect ECONNREFUSED 127.0.0.1:13084; retries: 3; next retry: 2026-11-06T08:30:00.000Z
+hints:
+  - peer "momoairi" is down: check its origin, the peer process, and that both sides share the same token.
+```
+
+- `token` 只报告 `configured` / `missing` / `error`，不显示值；
+- `web server` 是 `self` 路由的依赖，headless 下显示 `not listening`；
+- `peers` 的 `kind` 区分 `fixed` 与 `self`，并带最后错误、重试次数和下次重试时间；
+- `hints` 给出可直接执行的下一步；没有问题时输出 `no problems found`。
+
+doctor 不替代 `interconnect_ping`：doctor 只读本地状态，ping 才会主动探测对端。
 
 增删或改点 `peers` 同样不需要重启：profile patch 层的改动会重建本插件的 fiber，构造器按新映射
 重新建链。这条已实测（双向对照）：patch 层加入 `peers` 后出现拨号、删掉后拨号消失；改
@@ -434,7 +461,7 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 185/185 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、subagent 封栏与 parent-owned 普通 fork 可投递、`self` 路由的端口延迟解析/真实 `--port 0` webserver 回环/headless 降级/键约束、本机原因不得从线缆上来的负例等回归用例）；
+- 193/193 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、doctor 的 token/webserver/最后错误/重试诊断、subagent 封栏与 parent-owned 普通 fork 可投递、`self` 路由的端口延迟解析/真实 `--port 0` webserver 回环/headless 降级/键约束、本机原因不得从线缆上来的负例等回归用例）；
   类型检查、构建均干净；对公开 DSH master（0.2.2-rc.1）验证。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。

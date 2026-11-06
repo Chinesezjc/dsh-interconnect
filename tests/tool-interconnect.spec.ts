@@ -24,6 +24,17 @@ function fakeInterconnect(overrides: Partial<InterconnectService> = {}): Interco
     // One configured peer, so a tool that distinguishes "not configured" from
     // "configured but silent" has a stable answer unless a case overrides it.
     peers: vi.fn(() => [{ instanceId: 'peer', origin: 'http://127.0.0.1:13080', link: 'up' as const }]),
+    diagnose: vi.fn(async () => ({
+      ok: true,
+      instanceId: 'self',
+      token: 'configured' as const,
+      webServer: { available: true, port: 3080 },
+      requestTimeoutMs: 10000,
+      delivery: 'followup' as const,
+      allowResume: true,
+      peers: [{ instanceId: 'peer', origin: 'http://127.0.0.1:13080', link: 'up' as const, kind: 'fixed' as const, retries: 0 }],
+      hints: ['no problems found: the token is configured and every configured peer link is up.'],
+    })),
     selfSender: vi.fn(() => ({ instanceId: 'self', sessionId: '' })),
     ...overrides,
   } as unknown as InterconnectService
@@ -54,7 +65,7 @@ describe('tool-interconnect', () => {
   })
 
   it('removes every registered tool when the contributing fiber is disposed', async () => {
-    const names = ['interconnect_list', 'interconnect_peers', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
+    const names = ['interconnect_doctor', 'interconnect_list', 'interconnect_peers', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
     const { ctx, dispose } = await mounted(fakeInterconnect())
     expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(expect.arrayContaining(names))
     await dispose()
@@ -382,6 +393,52 @@ describe('tool-interconnect', () => {
     const text = (rendered as { text: string }[])[0]!.text
     expect(text).toContain('no peers configured')
     expect(text).toContain('peers mapping')
+    await dispose()
+  })
+
+  it('reports a healthy diagnosis through the doctor tool', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const tool = ctx.tools.get('interconnect_doctor')!
+    expect(tool.name).toBe('interconnect_doctor')
+    const value = await tool.execute({}, { signal: new AbortController().signal } as never)
+    expect(value).toMatchObject({ ok: true, instanceId: 'self', token: 'configured' })
+    const text = (tool.output.render({}, value as never) as { text: string }[])[0]!.text
+    expect(text).toContain('interconnect doctor: OK')
+    expect(text).toContain('token: configured')
+    expect(text).toContain('peer  fixed  http://127.0.0.1:13080  [up]')
+    await dispose()
+  })
+
+  it('renders a failing diagnosis with the last error, retries and hints', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect({
+      diagnose: vi.fn(async () => ({
+        ok: false,
+        instanceId: 'self',
+        token: 'missing' as const,
+        webServer: { available: false },
+        requestTimeoutMs: 10000,
+        delivery: 'followup' as const,
+        allowResume: true,
+        peers: [{
+          instanceId: 'self',
+          origin: 'self',
+          link: 'down' as const,
+          kind: 'self' as const,
+          lastError: 'no listening webServer port',
+          retries: 2,
+          nextRetryAt: 1700000000000,
+        }],
+        hints: ['DSH_INTERCONNECT_TOKEN is not configured', 'peer "self" is a self route'],
+      })),
+    }))
+    const tool = ctx.tools.get('interconnect_doctor')!
+    const value = await tool.execute({}, { signal: new AbortController().signal } as never)
+    const text = (tool.output.render({}, value as never) as { text: string }[])[0]!.text
+    expect(text).toContain('interconnect doctor: issues found')
+    expect(text).toContain('web server: not listening (headless)')
+    expect(text).toContain('last error: no listening webServer port')
+    expect(text).toContain('retries: 2')
+    expect(text).toContain('hints:')
     await dispose()
   })
 

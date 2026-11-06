@@ -2,6 +2,39 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.16.0（2026-11-06）
+
+新增只读诊断工具 `interconnect_doctor`。链路 `down` 时，模型此前只能拿到 `[down]` 和一句
+「重试可能成功」，无法判断是 token 没配、对端没起、端口/隧道不对，还是 `self` 路由没有
+webserver。doctor 把这些本地事实和最后错误集中到一次调用里，并给出可执行的下一步。
+
+### 变更
+
+- **新增 `interconnect_doctor`**：不拨号，读取 token 是否存在、宿主 webserver 是否监听、每个
+  peer 的 `fixed`/`self` 类型、链路状态、最后错误、尝试时间、成功时间、连续重试次数和下次重试
+  时间，并生成 `hints`。不返回 token 值。
+- **新增 `InterconnectService.diagnose()`**：返回结构化 `InterconnectDiagnosis`，供工具和后续
+  CLI/状态页复用；`peer` 行扩展为 `PeerDiagnosis`，`PeerStatus` 的既有字段不变。
+- **链路状态记录诊断信息**：`LinkState` 记录 `lastError`、`lastAttemptAt`、`lastOpenAt`、
+  `retries`、`nextRetryAt`；成功打开时清除最后错误。全部是本地状态，线缆协议不变。
+- **文档与 skill**：README 增加「诊断」一节和示例输出；skill 增加 doctor 说明与排障规则，
+  明确 doctor 不替代 `interconnect_ping`，也不得用换 peer/session 的方式绕过配置问题。
+
+### 验证
+
+- `pnpm run check`：typecheck + 193/193 tests + build 全绿。
+- 新增 8 条用例：无 peer、缺 token、token 读取失败、live peer 的 `lastOpenAt`、down peer 的
+  `lastError` 与 hint、无 webserver 的 `self` peer，以及 doctor 工具的健康/故障两种渲染。
+- 负例：把 `diagnose()` 里的 token 检查改成永远 `configured`，缺 token 用例转红；把
+  `LinkState` 的 `lastError` 在 close 时清空，down peer 用例转红。
+- 构建产物与 0.15.0 比对：**6 个变**（`lib/index.js` `31f0b5973e28622c`→`cbf70638d0818339`、
+  `lib/interconnect/index.js` `50bc07b205b4dd51`→`2cac9167feb9ff0f`、
+  `lib/tool-interconnect/index.js` `87241fd961991ad8`→`1c4802f122baea30`、
+  `lib/types/interconnect/index.d.ts` `01570872680e9366`→`abec58af2bf2a93d`、
+  `lib/types/interconnect/types.d.ts` `f744594e8b77f76f`→`6114b1d7d2b7ddc9`、
+  `dsh.plugin.json` `b146fd7f295fa07e`→`4566482d8426e301`）。`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）与 `cordis.patch.yml`（`b324e2a6f00f7515`）逐字节不变。
+
 ## 0.15.0（2026-11-05）
 
 支持同实例自指 peer：`peers` 的值可以写成字面量 `self`，拨号时用宿主 webserver 当前监听的端口

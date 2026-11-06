@@ -2186,6 +2186,92 @@ describe('interconnect peer status', () => {
   })
 })
 
+describe('interconnect diagnosis', () => {
+  it('reports no peers as a receive-only configuration with a hint', async () => {
+    const sender = await mounted('secret', new Set([]))
+    const diagnosis = await sender.ctx.interconnect.diagnose()
+    expect(diagnosis).toMatchObject({
+      token: 'configured',
+      ok: true,
+      peers: [],
+    })
+    expect(diagnosis.hints.join(' ')).toContain('no peers configured')
+    await sender.dispose()
+  })
+
+  it('reports a missing token and keeps the diagnosis not ok', async () => {
+    const sender = await mounted(undefined, new Set([]))
+    const diagnosis = await sender.ctx.interconnect.diagnose()
+    expect(diagnosis.token).toBe('missing')
+    expect(diagnosis.ok).toBe(false)
+    expect(diagnosis.hints.join(' ')).toContain('DSH_INTERCONNECT_TOKEN')
+    await sender.dispose()
+  })
+
+  it('reports a live peer as up with its last open time', async () => {
+    const receiver = await mounted('secret', new Set([SESSION_ID]))
+    const r = await serveUpgrade(receiver.upgrades)
+    const sender = await mounted('secret', new Set([]), { 'peer-b': `http://127.0.0.1:${String(r.port)}` })
+    try {
+      await awaitLink(sender.ctx.interconnect, 'peer-b')
+      const diagnosis = await sender.ctx.interconnect.diagnose()
+      expect(diagnosis.ok).toBe(true)
+      expect(diagnosis.peers[0]).toMatchObject({ instanceId: 'peer-b', kind: 'fixed', link: 'up' })
+      expect(diagnosis.peers[0]!.lastOpenAt).toBeTypeOf('number')
+      expect(diagnosis.hints.join(' ')).toContain('no problems found')
+    } finally {
+      await sender.dispose()
+      await r.close()
+      await receiver.dispose()
+    }
+  })
+
+  it('reports a down peer with its last dial error and a hint', async () => {
+    const sender = await mounted('secret', new Set([]), { 'dead-peer': 'http://127.0.0.1:1' })
+    try {
+      await waitUntil(async () => {
+        const diagnosis = await sender.ctx.interconnect.diagnose()
+        return diagnosis.peers[0]?.lastError !== undefined
+      })
+      const diagnosis = await sender.ctx.interconnect.diagnose()
+      expect(diagnosis.ok).toBe(false)
+      expect(diagnosis.peers[0]).toMatchObject({ instanceId: 'dead-peer', kind: 'fixed', link: 'down' })
+      expect(diagnosis.peers[0]!.lastError).toBeTruthy()
+      expect(diagnosis.hints.join(' ')).toContain('"dead-peer" is down')
+    } finally {
+      await sender.dispose()
+    }
+  })
+
+  it('reports a self peer without a webserver as unresolved', async () => {
+    const sender = await mounted('secret', new Set([]), { 'test-instance': 'self' }, 'followup', true, 'test-instance', { webServer: false })
+    const diagnosis = await sender.ctx.interconnect.diagnose()
+    expect(diagnosis.token).toBe('configured')
+    expect(diagnosis.webServer.available).toBe(false)
+    expect(diagnosis.peers[0]).toMatchObject({ instanceId: 'test-instance', kind: 'self', link: 'down' })
+    expect(diagnosis.ok).toBe(false)
+    expect(diagnosis.hints.join(' ')).toContain('self route')
+    await sender.dispose()
+  })
+
+  it('reports a credential read failure as token error', async () => {
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer([]) as WebServer)
+    ctx.provide('agents', fakeAgents(new Map(), new Set()))
+    ctx.provide('credentials', {
+      async resolve() {
+        throw new Error('credential store offline')
+      },
+    } as unknown as CredentialProvider)
+    const fiber = ctx.plugin(InterconnectService, { instanceId: 'token-error', requestTimeoutMs: 10000, peers: {} })
+    await fiber.await()
+    const diagnosis = await ctx.interconnect.diagnose()
+    expect(diagnosis.token).toBe('error')
+    expect(diagnosis.hints.join(' ')).toContain('credential store offline')
+    await fiber.dispose()
+  })
+})
+
 describe('interconnect dial and teardown edge paths', () => {
   it('dials an https origin with a wss protocol', async () => {
     const sender = await mounted('secret', new Set([]), { 'https-peer': 'https://127.0.0.1:1' })
