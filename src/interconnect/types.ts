@@ -360,6 +360,38 @@ export interface InterconnectDiagnosis {
   readonly ok: boolean
 }
 
+/** One pairing code offered by this instance. */
+export interface PairingOffer {
+  /** Signed, short-lived code to hand to the peer. */
+  readonly code: string
+  /** This instance's id. */
+  readonly instanceId: string
+  /** The origin the peer should dial, as advertised in the code. */
+  readonly origin: string
+  /** Epoch milliseconds after which the code is rejected. */
+  readonly expiresAt: number
+}
+
+/** One peer address learned from a pairing code. */
+export interface PairingPeer {
+  readonly instanceId: string
+  readonly origin: string
+}
+
+/** Result of accepting a pairing code. */
+export interface PairingAcceptance {
+  /** `join` when this side accepted an offer and issued a response; `complete` when it accepted that response. */
+  readonly role: 'join' | 'complete'
+  /** The peer that was just added. */
+  readonly peer: PairingPeer
+  /** Response code to hand back; present only for `join`. */
+  readonly code?: string
+  /** Expiry of the response code; present only for `join`. */
+  readonly expiresAt?: number
+  /** Whether the pairing was written to disk (`false` means live-only). */
+  readonly persisted: boolean
+}
+
 /** Service config bound by the Composition loader. */
 export interface Config {
   /**
@@ -406,6 +438,15 @@ export interface Config {
    * map means restarting the instance.
    */
   readonly peers?: Record<string, string>
+  /**
+   * Optional JSON file holding peers added through `interconnect_pair`.
+   * When omitted, a profile launched by `dsh` uses
+   * `<profileDir>/interconnect-pairings.json`; a composition without a
+   * `profileContext` and without this field keeps pairings in memory only
+   * (`persisted: false`). The file is written atomically and never contains
+   * the shared token.
+   */
+  readonly pairingFile?: string
   /**
    * Default mode for inbound `send` messages that carry no per-message
    * override. See {@link DeliveryMode} for what each mode does.

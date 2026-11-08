@@ -21,6 +21,12 @@ Your job is to pick the right peer, the right tool, and the right target.
   retry, plus actionable hints. Call it when a peer is unreachable or a `self`
   peer stays down. It does not dial a peer, so it cannot replace
   `interconnect_ping`.
+- `interconnect_pair` — pair without hand-editing the peers mapping. Call with
+  no code to mint a 10-minute code; give it to the other instance. Pass that
+  instance's code here to add it and receive a response code; pass the response
+  back to the first instance to complete. Codes carry only ids and origins, are
+  HMACed with the shared token, and never carry the token itself. Pass `origin`
+  when the default loopback origin is not reachable by the peer.
 - `interconnect_list` — discover which sessions are live on a peer instance.
   Every returned `sessionId` is a valid `interconnect_send` target at that
   moment. Use this first when you do not already know the target session id.
@@ -49,6 +55,20 @@ A reply also carries your identity automatically, so a multi-hop conversation
 (A → B → A → B) keeps working without either side manually forwarding
 addresses.
 
+## Pairing
+
+When no peer is configured, pair before sending:
+
+1. Call `interconnect_pair()` to mint a 10-minute code and send it to the other
+   instance over a trusted channel.
+2. On the other instance, call `interconnect_pair(code=...)`; it adds the first
+   peer and returns a response code. Pass `origin` when the default loopback
+   origin is not reachable from the peer.
+3. Pass the response code back to `interconnect_pair` on the first instance.
+
+Pairing only exchanges ids and origins; it does not establish a new trust
+relationship. Both sides must already share the same `DSH_INTERCONNECT_TOKEN`.
+
 ## Recommended workflow
 
 1. If you do not already know the peer ids available here, call
@@ -65,6 +85,9 @@ addresses.
 
 ## Troubleshooting
 
+- If no peer is configured, use `interconnect_pair` instead of inventing an
+  instance id or origin. A pairing code is a bearer capability for 10 minutes:
+  send it only over the channel the two owners already trust.
 - If every peer is down, or a `self` peer stays down, call
   `interconnect_doctor` and report its `hints` instead of guessing.
 - `token: missing` means the shared credential is not configured; `web server:

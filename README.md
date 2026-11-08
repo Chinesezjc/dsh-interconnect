@@ -21,6 +21,8 @@
   peer id 时先看有哪些可用目标，也是区分「没配这个 peer」与「配了但链路不通」的唯一入口
 - `interconnect_doctor`：只读诊断：共享 token 是否解析、宿主 webserver 是否监听、每个 peer 的
   链路/最后错误/重试时间，以及可直接执行的下一步；不主动拨号
+- `interconnect_pair`：用一次性 code 交换 id 和 origin，无需手写 `peers`；code 用共享 token
+  做 HMAC、10 分钟过期，配对结果默认写入 profile 目录
 - `interconnect_send`：向对端实例的指定 session 投递消息；默认唤醒没有 live agent 的持久 session（`resume: false` 关闭），可选 `delivery` 选投递模式
 - `interconnect_list`：列出对端实例的 live session（id + 标题 + 状态），用于在不预先知道 session id 时寻址
 - `interconnect_ping`：探测对端实例活性与身份
@@ -28,7 +30,7 @@
 
 **`skill-interconnect`** —— 配套 skill：
 
-- 向模型注册 `dsh-interconnect` skill，说明 `peers`/`doctor`/`list`/`ping`/`send`/`reply` 的完整用法、
+- 向模型注册 `dsh-interconnect` skill，说明 `peers`/`doctor`/`pair`/`list`/`ping`/`send`/`reply` 的完整用法、
   投递模式、`resume` 唤醒语义与失败处理。
 - 明确告知模型：`interconnect_send` 会自动注入发送方的 `instanceId` 和 `sessionId`，
   接收方凭记录的 sender 即可用 `interconnect_reply` 回信，不需要手工传地址。
@@ -87,6 +89,23 @@ hints:
 - `hints` 给出可直接执行的下一步；没有问题时输出 `no problems found`。
 
 doctor 不替代 `interconnect_ping`：doctor 只读本地状态，ping 才会主动探测对端。
+
+### 配对（`interconnect_pair`）
+
+不想手写 `peers` 时，用三步交换 id 和 origin：
+
+1. A 调 `interconnect_pair()`，得到 10 分钟有效的 code；把 code 发给 B。
+2. B 调 `interconnect_pair(code=<A 的 code>, origin="http://<B 可拨地址>:<port>")`：B 添加 A，
+   并返回 response code；把 response code 发回 A。
+3. A 调 `interconnect_pair(code=<response>)`：A 添加 B，配对完成。
+
+`origin` 默认是本实例的 `http://127.0.0.1:<webServer.port>`；跨机时必须传对端能拨到的隧道或
+LAN 地址。code 用 `DSH_INTERCONNECT_TOKEN` 做 HMAC，只有共享同一 token 的实例能验证；code
+不含 token，10 分钟过期。配对不建立新信任：两端仍必须配置同一个 token。
+
+配对结果默认写入 `<profileDir>/interconnect-pairings.json`（由 `dsh` 启动的 profile；Desktop
+同样适用）。其它启动方式可以用 `pairingFile` 指定文件；两者都没有时只在当前进程内有效，工具会
+返回 `persisted: false` 和 warning。静态 `peers` 与配对文件同名时静态配置优先。
 
 增删或改点 `peers` 同样不需要重启：profile patch 层的改动会重建本插件的 fiber，构造器按新映射
 重新建链。这条已实测（双向对照）：patch 层加入 `peers` 后出现拨号、删掉后拨号消失；改
@@ -297,6 +316,7 @@ Host 自己的 resume 路径对同一个 session 报 `SessionFormatUnsupportedEr
 | `instanceId` | `'dsh'` | 本实例自报的 id，出现在 `ping`/`send`/`list` 的回包里。也作为「对端如何寻址到我」的身份 |
 | `requestTimeoutMs` | `10000` | 出站请求超时，上限 60000 |
 | `peers` | `{}` | **对端路由映射**：`{ [对端 instanceId]: 我拨向它的 origin }`，例如隧道端点 `http://127.0.0.1:13080`；值也可以是字面量 `self`，表示拨向本实例自己的宿主 webserver，端口在拨号时从 `webServer.port` 读取（键必须等于 `instanceId`，见「同一实例内两个会话互通」）。激活时对每个对端自动建持久 WS 链；`send`/`reply`/`ping`/`list` 都按 instanceId 走对应链接。改这一行不需要重启：profile patch 层的改动会重建 fiber 并按新映射建链 |
+| `pairingFile` | `<profileDir>/interconnect-pairings.json` | `interconnect_pair` 的持久化文件；省略时由 `profileContext.dir` 推导，没有 profile 也不配置则配对只在当前进程内有效。静态 `peers` 与它同名时静态配置优先 |
 | `delivery` | `'followup'` | 入站消息未带 `delivery` 时的默认投递模式 |
 | `allowResume` | `true` | 是否允许发送方用 `resume` 唤醒本机的离线 session |
 
@@ -461,7 +481,7 @@ pnpm run build    # esbuild → lib/
 
 ## 验证
 
-- 193/193 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、doctor 的 token/webserver/最后错误/重试诊断、subagent 封栏与 parent-owned 普通 fork 可投递、`self` 路由的端口延迟解析/真实 `--port 0` webserver 回环/headless 降级/键约束、本机原因不得从线缆上来的负例等回归用例）；
+- 208/208 单测通过（服务 + 工具 + skill，含 wire 校验、畸形帧、心跳/池清理、结果帧按 kind 绑定与投影、list 的行数与字节双上限及满页提示、peer 状态与「未配置」分支、doctor 的 token/webserver/最后错误/重试诊断、pair 的 HMAC/过期/落盘与跨实例交换、subagent 封栏与 parent-owned 普通 fork 可投递、`self` 路由的端口延迟解析/真实 `--port 0` webserver 回环/headless 降级/键约束、本机原因不得从线缆上来的负例等回归用例）；
   类型检查、构建均干净；对公开 DSH master（0.2.2-rc.1）验证。
 - 已在两台机器之间实测双向互通：消息投递、WebSocket 事件推流、以及 agent 经
   `interconnect_send` 工具反向回发，均验证通过。

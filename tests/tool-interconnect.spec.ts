@@ -35,6 +35,20 @@ function fakeInterconnect(overrides: Partial<InterconnectService> = {}): Interco
       peers: [{ instanceId: 'peer', origin: 'http://127.0.0.1:13080', link: 'up' as const, kind: 'fixed' as const, retries: 0 }],
       hints: ['no problems found: the token is configured and every configured peer link is up.'],
     })),
+    instanceId: 'self',
+    createPairingCode: vi.fn(async (origin?: string) => ({
+      code: 'offer-code',
+      instanceId: 'self',
+      origin: origin ?? 'http://127.0.0.1:3080',
+      expiresAt: 1700000000000,
+    })),
+    acceptPairingCode: vi.fn(async (code: string) => ({
+      role: 'join' as const,
+      peer: { instanceId: 'peer', origin: 'http://127.0.0.1:13080' },
+      code: 'response-code',
+      expiresAt: 1700000000000,
+      persisted: false,
+    })),
     selfSender: vi.fn(() => ({ instanceId: 'self', sessionId: '' })),
     ...overrides,
   } as unknown as InterconnectService
@@ -65,7 +79,7 @@ describe('tool-interconnect', () => {
   })
 
   it('removes every registered tool when the contributing fiber is disposed', async () => {
-    const names = ['interconnect_doctor', 'interconnect_list', 'interconnect_peers', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
+    const names = ['interconnect_doctor', 'interconnect_list', 'interconnect_pair', 'interconnect_peers', 'interconnect_ping', 'interconnect_reply', 'interconnect_send']
     const { ctx, dispose } = await mounted(fakeInterconnect())
     expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(expect.arrayContaining(names))
     await dispose()
@@ -439,6 +453,66 @@ describe('tool-interconnect', () => {
     expect(text).toContain('last error: no listening webServer port')
     expect(text).toContain('retries: 2')
     expect(text).toContain('hints:')
+    await dispose()
+  })
+
+  it('mints a pairing code through the pair tool', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const tool = ctx.tools.get('interconnect_pair')!
+    const value = await tool.execute(
+      { origin: 'http://127.0.0.1:13080' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(value).toMatchObject({
+      role: 'start',
+      selfInstanceId: 'self',
+      origin: 'http://127.0.0.1:13080',
+      code: 'offer-code',
+    })
+    const text = (tool.output.render({}, value as never) as { text: string }[])[0]!.text
+    expect(text).toContain('pairing code')
+    expect(text).toContain('offer-code')
+    await dispose()
+  })
+
+  it('joins with a code and returns a live-only warning when nothing persists', async () => {
+    const { ctx, dispose } = await mounted(fakeInterconnect())
+    const tool = ctx.tools.get('interconnect_pair')!
+    const value = await tool.execute(
+      { code: 'offer-code', origin: 'http://127.0.0.1:13081' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(value).toMatchObject({
+      role: 'join',
+      peer: { instanceId: 'peer', origin: 'http://127.0.0.1:13080' },
+      code: 'response-code',
+      persisted: false,
+    })
+    const text = (tool.output.render({}, value as never) as { text: string }[])[0]!.text
+    expect(text).toContain('paired with peer')
+    expect(text).toContain('response code')
+    expect(text).toContain('live-only')
+    await dispose()
+  })
+
+  it('renders a completed pairing without a response code', async () => {
+    const interconnect = fakeInterconnect({
+      acceptPairingCode: vi.fn(async () => ({
+        role: 'complete' as const,
+        peer: { instanceId: 'peer', origin: 'http://127.0.0.1:13080' },
+        persisted: true,
+      })),
+    })
+    const { ctx, dispose } = await mounted(interconnect)
+    const tool = ctx.tools.get('interconnect_pair')!
+    const value = await tool.execute(
+      { code: 'response-code' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(value).toMatchObject({ role: 'complete', persisted: true })
+    const text = (tool.output.render({}, value as never) as { text: string }[])[0]!.text
+    expect(text).toContain('paired with peer')
+    expect(text).not.toContain('response code')
     await dispose()
   })
 

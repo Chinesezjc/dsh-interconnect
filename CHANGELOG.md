@@ -2,6 +2,44 @@
 
 本文件记录 dsh-interconnect 的版本演进。每次变更按时间倒序追加，说明 WHAT（改了什么）与 WHY（为什么），不变更的细节留在 README / commit 正文。
 
+## 0.17.0（2026-11-09）
+
+新增 `interconnect_pair`：两端用一次性 code 交换 `instanceId` 和 origin，不再手写 `peers`、复制
+地址或猜测端口。pairing 只交换地址，不建立新信任；code 用共享 token 做 HMAC，只有已持有同一
+`DSH_INTERCONNECT_TOKEN` 的实例才能完成配对。
+
+### 变更
+
+- **新工具 `interconnect_pair`**：无参数调用生成 10 分钟有效的 code；把 code 交给对端，对端用
+  `code=` 调用后添加本端并返回 response code；本端再把 response code 传回完成。`origin` 参数
+  用于跨机时声明对端可拨的隧道/LAN 地址，默认是本实例的 loopback webserver origin。
+- **新服务方法**：`createPairingCode()`、`acceptPairingCode()`、`addPeer()`；新增
+  `PairingOffer`/`PairingAcceptance` 类型。`InterconnectService.instanceId` 变为公开只读字段。
+- **codec**：`src/interconnect/pairing.ts` 用 HMAC-SHA256 + base64url 签名 JSON，校验格式、
+  签名、`expiresAt` 和 `inReplyTo`；不同 token、篡改和过期都会被拒绝。code 不含 token 本身。
+- **持久化**：配对 peer 默认写入 `<profileDir>/interconnect-pairings.json`（`dsh` 启动的
+  profile，Desktop 同样适用）；没有 `profileContext` 时用 `pairingFile` 配置，两者都没有则只在
+  当前进程内有效并返回 `persisted: false` 的 warning。静态 `peers` 与配对文件同名时静态配置优先。
+- **文档与 skill**：README 增加配对三步示例、`pairingFile` 配置和跨机 origin 说明；skill 增加
+  pairing 流程和「code 只走已信任通道」的约束。
+
+### 验证
+
+- `pnpm run check`：typecheck + 208/208 tests + build 全绿。
+- 新增 14 条用例：codec 的 round-trip/不同 token/篡改/过期/格式错误；两端 offer→join→
+  complete；缺 token；不同 token；自配对；`addPeer` 幂等与冲突；显式 `pairingFile` 的写入与
+  重启加载；profile 目录默认路径；pair 工具的 start/join/complete 渲染。
+- 负例：把 codec 的 HMAC 比较改成恒真，不同 token 用例转红；把 pairing 文件写入改成只写内存，
+  重启加载用例转红。
+- 构建产物与 0.16.0 比对：**6 个变**（`lib/index.js` `cbf70638d0818339`→`1b76b21a5257e665`、
+  `lib/interconnect/index.js` `2cac9167feb9ff0f`→`05c38ade4ac94f2c`、
+  `lib/tool-interconnect/index.js` `1c4802f122baea30`→`7da79a95ad8f1378`、
+  `lib/types/interconnect/index.d.ts` `abec58af2bf2a93d`→`ea6ec2e977e4750d`、
+  `lib/types/interconnect/types.d.ts` `6114b1d7d2b7ddc9`→`c35ae1aad36c5712`、
+  `dsh.plugin.json` `4566482d8426e301`→`e7bf395e406046db`）。`lib/skill-interconnect/index.js`
+  （`f3503a044b6791e9`）与 `cordis.patch.yml`（`b324e2a6f00f7515`）逐字节不变；skill 正文是
+  运行时读取的 `assets/dsh-interconnect.md`，所以它的内容变化不会改变这个 bundle。
+
 ## 0.16.0（2026-11-06）
 
 新增只读诊断工具 `interconnect_doctor`。链路 `down` 时，模型此前只能拿到 `[down]` 和一句
