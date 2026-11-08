@@ -14,7 +14,9 @@
 
 import { Context, Service, LoggerService } from '@deepseek-ai/cordis'
 import { createHash, randomUUID, timingSafeEqual as constantTimeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type { WebServer, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -33,6 +35,7 @@ import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import z from '@deepseek-ai/schemastery'
 import WebSocket, { WebSocketServer } from 'ws'
 import type { RawData } from 'ws'
+import { decodePairingCode, encodePairingCode, PAIRING_CODE_TTL_MS, type PairingPayload } from './pairing.ts'
 import {
   type Config,
   type DeliveryMode,
@@ -41,6 +44,8 @@ import {
   type LinkFrame,
   type LinkMessage,
   type ListResult,
+  type PairingAcceptance,
+  type PairingOffer,
   type PeerDiagnosis,
   type PeerRouteKind,
   type PeerStatus,
@@ -362,14 +367,17 @@ export class InterconnectService extends Service {
     instanceId: z.string().max(MAX_INSTANCE_ID_CHARS).default(DEFAULT_INSTANCE_ID),
     requestTimeoutMs: z.natural().max(60000).default(DEFAULT_REQUEST_TIMEOUT_MS),
     peers: z.dict(z.string()).default({}),
+    pairingFile: z.string().required(false),
     delivery: z.union([z.const('followup'), z.const('steer'), z.const('inject')]).default('followup'),
     allowResume: z.boolean().default(true),
   })
 
-  private readonly instanceId: string
+  readonly instanceId: string
   private readonly requestTimeoutMs: number
   private readonly delivery: DeliveryMode
   private readonly allowResume: boolean
+  private readonly pairingFile: string | undefined
+  private pairedPeers = new Map<string, PairedPeerRecord>()
   private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_LINK_FRAME_BYTES })
   private readonly sockets = new Set<WebSocket>()
   /** Outbound peer links keyed by the peer's `instanceId`. */
@@ -399,6 +407,8 @@ export class InterconnectService extends Service {
     this.delivery = config.delivery ?? 'followup'
     /* v8 ignore next 1 -- the Config schema applies its allowResume default before the constructor runs. */
     this.allowResume = config.allowResume ?? true
+    this.pairingFile = this.resolvePairingFile(config.pairingFile)
+    this.pairedPeers = this.loadPairedPeers()
     // Validate every fixed peer origin before dialing any of them: the same URL
     // construction dial() uses, so a malformed origin fails the load before a
     // socket or reconnect loop exists to leak (misconfiguration fails loud). A
@@ -427,6 +437,14 @@ export class InterconnectService extends Service {
     for (const [peerInstanceId, origin] of Object.entries(config.peers ?? {})) {
       const self = origin === SELF_PEER_ORIGIN
       this.link(peerInstanceId, self ? () => this.selfOrigin() : origin, self ? 'self' : 'fixed')
+    }
+    // Pairing peers persist across restarts in a sidecar file. Static config
+    // wins when both name the same id, so an operator can override a paired
+    // route without deleting it first.
+    /* v8 ignore next 1 -- the Config schema applies its peers default before the constructor runs. */
+    for (const [peerInstanceId, peer] of this.pairedPeers) {
+      if (peerInstanceId in (config.peers ?? {})) continue
+      this.link(peerInstanceId, peer.origin, 'fixed')
     }
 
     const upgrade: WebUpgradeRoute = {
@@ -702,6 +720,205 @@ export class InterconnectService extends Service {
       peers,
       hints,
       ok: token === 'configured' && peers.every(peer => peer.link === 'up'),
+    }
+  }
+
+  /**
+   * Add one peer learned from pairing, persisting it when a pairing file is
+   * available. Static config wins: a peer id already linked from `Config.peers`
+   * with a different origin is refused rather than overwritten.
+   * @param instanceId - peer id announced by the other instance.
+   * @param origin - origin this instance should dial for that peer.
+   * @returns whether the pairing was written to disk (false means live-only).
+   */
+  async addPeer(instanceId: string, origin: string): Promise<{ persisted: boolean }> {
+    if (instanceId.length === 0 || instanceId.length > MAX_INSTANCE_ID_CHARS) {
+      throw new Error(`interconnect: pairing peer id must be 1-${String(MAX_INSTANCE_ID_CHARS)} characters`)
+    }
+    if (instanceId === this.instanceId) {
+      throw new Error('interconnect: cannot pair an instance with itself; use peers.<id>: self for same-instance routing')
+    }
+    const peer = trimBase(origin)
+    if (peer === SELF_PEER_ORIGIN) throw new Error('interconnect: pairing origin must be a URL, not the self sentinel')
+    linkUrl(peer)
+    const existing = this.linkStates.get(instanceId)
+    if (existing !== undefined) {
+      if (existing.peer === peer && existing.kind === 'fixed') return { persisted: this.pairingFile !== undefined }
+      throw new Error(
+        `interconnect: peer "${instanceId}" is already configured with origin ${existing.peer}; remove or change that entry before pairing a different origin`,
+      )
+    }
+    if (this.pairingFile !== undefined) {
+      const next = new Map(this.pairedPeers)
+      next.set(instanceId, { origin: peer, addedAt: new Date().toISOString() })
+      this.writePairingFile(next)
+      this.pairedPeers = next
+    }
+    this.link(instanceId, peer, 'fixed')
+    return { persisted: this.pairingFile !== undefined }
+  }
+
+  /**
+   * Issue a short-lived pairing code for this instance. The code is HMACed with
+   * the shared token, so it only verifies on an instance holding the same
+   * credential; the code itself carries the advertised origin and id.
+   * @param origin - address the other instance should dial; defaults to this
+   *   instance's loopback webserver origin. Cross-machine pairing must pass a
+   *   reachable tunnel/LAN address.
+   * @returns the signed code and its expiry.
+   */
+  async createPairingCode(origin?: string): Promise<PairingOffer> {
+    const token = await this.requirePairingToken()
+    const resolved = this.pairingOrigin(origin)
+    const expiresAt = Date.now() + PAIRING_CODE_TTL_MS
+    const payload: PairingPayload = {
+      v: 1,
+      instanceId: this.instanceId,
+      origin: resolved,
+      nonce: randomUUID(),
+      expiresAt,
+    }
+    return { code: encodePairingCode(payload, token), instanceId: this.instanceId, origin: resolved, expiresAt }
+  }
+
+  /**
+   * Accept a pairing code from another instance. An offer (no `inReplyTo`)
+   * adds the peer here and returns a response code for the offerer; a response
+   * (`inReplyTo` present) adds the peer and completes the exchange.
+   * @param code - code produced by another instance's `createPairingCode` or
+   *   by this method's `join` result.
+   * @param origin - address to advertise back; defaults to this instance's
+   *   loopback webserver origin.
+   * @returns the peer that was added and, for a join, the response code.
+   */
+  async acceptPairingCode(code: string, origin?: string): Promise<PairingAcceptance> {
+    const token = await this.requirePairingToken()
+    const payload = decodePairingCode(code, token)
+    if (payload.instanceId === this.instanceId) {
+      throw new Error('interconnect: cannot pair an instance with itself; use peers.<id>: self for same-instance routing')
+    }
+    const peer = { instanceId: payload.instanceId, origin: payload.origin }
+    // Resolve a response origin before mutating state: a join with no dialable
+    // origin must fail without leaving a half-written peer behind.
+    const responseOrigin = payload.inReplyTo === undefined ? this.pairingOrigin(origin) : undefined
+    const { persisted } = await this.addPeer(payload.instanceId, payload.origin)
+    if (responseOrigin === undefined) return { role: 'complete', peer, persisted }
+    const expiresAt = Date.now() + PAIRING_CODE_TTL_MS
+    const response: PairingPayload = {
+      v: 1,
+      instanceId: this.instanceId,
+      origin: responseOrigin,
+      nonce: randomUUID(),
+      expiresAt,
+      inReplyTo: payload.nonce,
+    }
+    return { role: 'join', peer, code: encodePairingCode(response, token), expiresAt, persisted }
+  }
+
+  /** Resolve a dialable origin for a pairing code. */
+  private pairingOrigin(origin?: string): string {
+    if (origin !== undefined && origin.length > 0) {
+      const peer = trimBase(origin)
+      if (peer === SELF_PEER_ORIGIN) throw new Error('interconnect: pairing origin must be a URL, not the self sentinel')
+      linkUrl(peer)
+      return peer
+    }
+    const self = this.selfOrigin()
+    if (self === undefined) {
+      throw new Error(
+        'interconnect: this instance has no listening webserver; pass origin=... with an address the other instance can dial',
+      )
+    }
+    return self
+  }
+
+  /** Resolve the token or explain why pairing cannot proceed. */
+  private async requirePairingToken(): Promise<string> {
+    const token = await this.resolveToken()
+    if (token === undefined) {
+      throw new Error(
+        'interconnect: pairing requires DSH_INTERCONNECT_TOKEN to be configured; set the same token on both instances',
+      )
+    }
+    return token
+  }
+
+  /**
+   * Resolve the pairing sidecar path. An explicit config value wins; otherwise
+   * a `dsh`-launched profile stores it next to its patch file. A composition
+   * with neither keeps pairings in memory only.
+   */
+  private resolvePairingFile(configured: string | undefined): string | undefined {
+    const profileDir = this.profileDir()
+    if (configured !== undefined && configured.length > 0) {
+      return isAbsolute(configured) ? configured : resolve(profileDir ?? process.cwd(), configured)
+    }
+    return profileDir === undefined ? undefined : join(profileDir, 'interconnect-pairings.json')
+  }
+
+  /** The launcher-owned profile directory, when this composition has one. */
+  private profileDir(): string | undefined {
+    const profile = (this.ctx as unknown as { get(name: string): { dir?: unknown } | undefined }).get('profileContext')
+    return typeof profile?.dir === 'string' && profile.dir.length > 0 ? profile.dir : undefined
+  }
+
+  /** Read the sidecar, skipping invalid entries instead of failing activation. */
+  private loadPairedPeers(): Map<string, PairedPeerRecord> {
+    const peers = new Map<string, PairedPeerRecord>()
+    const file = this.pairingFile
+    if (file === undefined || !existsSync(file)) return peers
+    try {
+      const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown
+      if (typeof raw !== 'object' || raw === null) throw new Error('not a JSON object')
+      const record = raw as { version?: unknown; peers?: unknown }
+      if (record.version !== 1 || typeof record.peers !== 'object' || record.peers === null) {
+        throw new Error('expected version 1 and a peers object')
+      }
+      for (const [instanceId, value] of Object.entries(record.peers as Record<string, unknown>)) {
+        if (instanceId.length === 0 || instanceId.length > MAX_INSTANCE_ID_CHARS) continue
+        // A sidecar entry naming this instance would create a second link to
+        // our own inbound socket under our own id; self routing owns that case.
+        if (instanceId === this.instanceId) continue
+        if (typeof value !== 'object' || value === null) continue
+        const origin = (value as { origin?: unknown }).origin
+        if (typeof origin !== 'string') continue
+        try {
+          linkUrl(trimBase(origin))
+        } catch {
+          continue
+        }
+        const addedAt = (value as { addedAt?: unknown }).addedAt
+        peers.set(instanceId, {
+          origin: trimBase(origin),
+          addedAt: typeof addedAt === 'string' ? addedAt : new Date(0).toISOString(),
+        })
+      }
+    } catch (error) {
+      this.ctx.logger.warn(
+        `interconnect: ignoring unreadable pairing file ${file}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    return peers
+  }
+
+  /** Atomically replace the sidecar with the given peers. */
+  private writePairingFile(peers: Map<string, PairedPeerRecord>): void {
+    const file = this.pairingFile
+    /* v8 ignore next 1 -- callers only write when a file is configured. */
+    if (file === undefined) return
+    mkdirSync(dirname(file), { recursive: true })
+    const tmp = `${file}.${String(process.pid)}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(tmp, `${JSON.stringify({ version: 1, peers: Object.fromEntries(peers) }, null, 2)}\n`)
+      renameSync(tmp, file)
+    } catch (error) {
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        // The original error is the actionable one; a cleanup failure cannot
+        // change what the caller sees.
+      }
+      throw error
     }
   }
 
@@ -1428,6 +1645,12 @@ interface DialedSocket {
   open: () => void
   close: () => void
   error: (error: Error) => void
+}
+
+/** One peer persisted in the pairing sidecar. */
+interface PairedPeerRecord {
+  origin: string
+  addedAt: string
 }
 
 /**

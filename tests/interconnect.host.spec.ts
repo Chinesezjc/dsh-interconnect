@@ -1,8 +1,11 @@
 /** Host half: upgrade auth, WS msg/query frames, and instanceId-addressed delivery. */
 import { once } from 'node:events'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage } from 'node:http'
 import { connect } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
@@ -237,6 +240,8 @@ interface MountOptions {
   readonly webServer?: boolean
   /** Reading the fake webserver's current port; 0 until a real server listens. */
   readonly webServerPort?: () => number
+  /** Sidecar file for pairing tests; omitted keeps pairing live-only in tests. */
+  readonly pairingFile?: string
 }
 
 async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([SESSION_ID]), peers: Record<string, string> = {}, delivery: DeliveryMode = 'followup', allowResume = true, instanceId = 'test-instance', options: MountOptions = {}): Promise<{
@@ -267,6 +272,7 @@ async function mounted(token?: string, liveIds: ReadonlySet<string> = new Set([S
     peers,
     delivery,
     allowResume,
+    ...(options.pairingFile === undefined ? {} : { pairingFile: options.pairingFile }),
   })
   await fiber.await()
   return {
@@ -2269,6 +2275,115 @@ describe('interconnect diagnosis', () => {
     expect(diagnosis.token).toBe('error')
     expect(diagnosis.hints.join(' ')).toContain('credential store offline')
     await fiber.dispose()
+  })
+})
+
+describe('interconnect pairing', () => {
+  it('pairs two instances through an offer and a response code', async () => {
+    const a = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-a')
+    const b = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-b')
+    try {
+      const offer = await a.service.createPairingCode('http://127.0.0.1:13080')
+      expect(offer).toMatchObject({ instanceId: 'peer-a', origin: 'http://127.0.0.1:13080' })
+      expect(offer.expiresAt).toBeGreaterThan(Date.now())
+      const join = await b.service.acceptPairingCode(offer.code, 'http://127.0.0.1:13081')
+      expect(join).toMatchObject({
+        role: 'join',
+        peer: { instanceId: 'peer-a', origin: 'http://127.0.0.1:13080' },
+        persisted: false,
+      })
+      expect(join.code).toBeTypeOf('string')
+      const complete = await a.service.acceptPairingCode(join.code!)
+      expect(complete).toMatchObject({
+        role: 'complete',
+        peer: { instanceId: 'peer-b', origin: 'http://127.0.0.1:13081' },
+        persisted: false,
+      })
+      expect(a.service.peers().map(peer => peer.instanceId)).toContain('peer-b')
+      expect(b.service.peers().map(peer => peer.instanceId)).toContain('peer-a')
+    } finally {
+      await a.dispose()
+      await b.dispose()
+    }
+  })
+
+  it('refuses to mint a code without the shared token', async () => {
+    const sender = await mounted(undefined, new Set([]))
+    try {
+      await expect(sender.service.createPairingCode('http://127.0.0.1:1'))
+        .rejects.toThrow(/DSH_INTERCONNECT_TOKEN/)
+    } finally {
+      await sender.dispose()
+    }
+  })
+
+  it('rejects a code issued under a different token', async () => {
+    const a = await mounted('secret-a', new Set([]), {}, 'followup', true, 'peer-a')
+    const b = await mounted('secret-b', new Set([]), {}, 'followup', true, 'peer-b')
+    try {
+      const offer = await a.service.createPairingCode('http://127.0.0.1:13080')
+      await expect(b.service.acceptPairingCode(offer.code, 'http://127.0.0.1:13081'))
+        .rejects.toThrow(/different DSH_INTERCONNECT_TOKEN/)
+    } finally {
+      await a.dispose()
+      await b.dispose()
+    }
+  })
+
+  it('refuses to pair an instance with itself', async () => {
+    const sender = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-a')
+    try {
+      const offer = await sender.service.createPairingCode('http://127.0.0.1:13080')
+      await expect(sender.service.acceptPairingCode(offer.code)).rejects.toThrow(/itself/)
+    } finally {
+      await sender.dispose()
+    }
+  })
+
+  it('stores pairings in the profile directory by default', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ic-pair-'))
+    try {
+      const sender = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-a', {
+        provides: { profileContext: { dir } },
+      })
+      await sender.service.addPeer('peer-b', 'http://127.0.0.1:13081')
+      expect(existsSync(join(dir, 'interconnect-pairings.json'))).toBe(true)
+      await sender.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('persists a paired peer and loads it on the next activation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ic-pair-'))
+    const file = join(dir, 'pairings.json')
+    try {
+      const first = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-a', { pairingFile: file })
+      await first.service.addPeer('peer-b', 'http://127.0.0.1:13081')
+      expect(first.service.peers().map(peer => peer.instanceId)).toContain('peer-b')
+      const written = JSON.parse(readFileSync(file, 'utf8')) as { peers: Record<string, { origin: string }> }
+      expect(written.peers['peer-b']!.origin).toBe('http://127.0.0.1:13081')
+      await first.dispose()
+
+      const second = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-a', { pairingFile: file })
+      expect(second.service.peers().map(peer => peer.instanceId)).toContain('peer-b')
+      await second.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps an existing paired origin idempotent and rejects a conflicting one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ic-pair-'))
+    try {
+      const sender = await mounted('secret', new Set([]), {}, 'followup', true, 'peer-a', { pairingFile: join(dir, 'pairings.json') })
+      await sender.service.addPeer('peer-b', 'http://127.0.0.1:13081')
+      await expect(sender.service.addPeer('peer-b', 'http://127.0.0.1:13081')).resolves.toEqual({ persisted: true })
+      await expect(sender.service.addPeer('peer-b', 'http://127.0.0.1:13082')).rejects.toThrow(/already configured/)
+      await sender.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

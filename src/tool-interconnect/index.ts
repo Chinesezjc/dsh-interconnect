@@ -466,6 +466,96 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'interconnect_pair',
+    description: 'Pair this instance with another DSH instance without hand-editing the peers mapping '
+      + 'or copying origins. Call with no code to mint a short-lived pairing code; send that code to '
+      + 'the other instance. On the other instance, call interconnect_pair with that code: it adds this '
+      + 'peer and returns a response code. Pass the response code back here to complete the exchange. '
+      + 'Codes are HMACed with DSH_INTERCONNECT_TOKEN, expire in 10 minutes, and carry only ids and '
+      + 'origins, never the token. Pass origin=... when the default loopback origin is not reachable '
+      + 'from the peer (cross-machine pairing).',
+    parameters: {
+      code: {
+        type: 'string',
+        description: 'A pairing code from the other instance. Omit to start a pairing and mint a code.',
+      },
+      origin: {
+        type: 'string',
+        description: 'Address this instance advertises for the peer to dial. Defaults to this '
+          + "instance's loopback webserver origin; use a tunnel/LAN address for another machine.",
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          role: { type: 'string', required: true },
+          selfInstanceId: { type: 'string', required: true },
+          origin: { type: 'string' },
+          code: { type: 'string' },
+          expiresAt: { type: 'number' },
+          peer: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              instanceId: { type: 'string', required: true },
+              origin: { type: 'string', required: true },
+            },
+          },
+          persisted: { type: 'boolean' },
+          warning: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const lines: string[] = []
+        if (value.role === 'start') {
+          lines.push(
+            `pairing code (valid until ${value.expiresAt === undefined ? 'unknown' : new Date(value.expiresAt).toISOString()}):`,
+            value.code ?? '',
+            'Send this code to the other instance, then pass its response code back to interconnect_pair.',
+          )
+        } else {
+          lines.push(`paired with ${value.peer?.instanceId ?? 'unknown'} at ${value.peer?.origin ?? 'unknown'}`)
+          if (value.role === 'join' && value.code !== undefined) {
+            lines.push(
+              `response code (valid until ${value.expiresAt === undefined ? 'unknown' : new Date(value.expiresAt).toISOString()}):`,
+              value.code,
+              'Send this code back to complete the pairing on the other side.',
+            )
+          }
+        }
+        if (value.warning !== undefined) lines.push(value.warning)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      if (args.code === undefined) {
+        const offer = await raceSignal(exec.signal, interconnect.createPairingCode(args.origin))
+        return {
+          role: 'start' as const,
+          selfInstanceId: offer.instanceId,
+          origin: offer.origin,
+          code: offer.code,
+          expiresAt: offer.expiresAt,
+        }
+      }
+      const accepted = await raceSignal(exec.signal, interconnect.acceptPairingCode(args.code, args.origin))
+      return {
+        role: accepted.role,
+        selfInstanceId: interconnect.instanceId,
+        ...(accepted.code === undefined ? {} : { code: accepted.code }),
+        ...(accepted.expiresAt === undefined ? {} : { expiresAt: accepted.expiresAt }),
+        peer: accepted.peer,
+        persisted: accepted.persisted,
+        ...(accepted.persisted
+          ? {}
+          : { warning: 'pairing is live-only: this composition has no pairing file, so it will not survive a restart' }),
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'interconnect_reply',
     description: 'Deliver one text message back to the peer that this session last received an '
       + 'interconnect message from. Only the reply text is needed: the replying session is this '
