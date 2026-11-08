@@ -94,14 +94,15 @@ doctor 不替代 `interconnect_ping`：doctor 只读本地状态，ping 才会�
 
 不想手写 `peers` 时，用三步交换 id 和 origin：
 
-1. A 调 `interconnect_pair()`，得到 10 分钟有效的 code；把 code 发给 B。
+1. A 调 `interconnect_pair(origin="http://<A 可拨地址>:<port>")`（同机可省略 `origin`），得到
+   10 分钟有效的 code；把 code 发给 B。
 2. B 调 `interconnect_pair(code=<A 的 code>, origin="http://<B 可拨地址>:<port>")`：B 添加 A，
    并返回 response code；把 response code 发回 A。
 3. A 调 `interconnect_pair(code=<response>)`：A 添加 B，配对完成。
 
-`origin` 默认是本实例的 `http://127.0.0.1:<webServer.port>`；跨机时必须传对端能拨到的隧道或
-LAN 地址。code 用 `DSH_INTERCONNECT_TOKEN` 做 HMAC，只有共享同一 token 的实例能验证；code
-不含 token，10 分钟过期。配对不建立新信任：两端仍必须配置同一个 token。
+`origin` 默认是本实例的 `http://127.0.0.1:<webServer.port>`；跨机时两端都要在 start/join 时
+传各自对端能拨到的隧道或 LAN 地址。code 用 `DSH_INTERCONNECT_TOKEN` 做 HMAC，只有共享同一
+token 的实例能验证；code 不含 token，10 分钟过期。配对不建立新信任：两端仍必须配置同一个 token。
 
 配对结果默认写入 `<profileDir>/interconnect-pairings.json`（由 `dsh` 启动的 profile；Desktop
 同样适用）。其它启动方式可以用 `pairingFile` 指定文件；两者都没有时只在当前进程内有效，工具会
