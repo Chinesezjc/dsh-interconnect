@@ -60,7 +60,8 @@ addresses.
 When no peer is configured, pair before sending:
 
 1. Call `interconnect_pair()` to mint a 10-minute code and send it to the other
-   instance over a trusted channel.
+   instance over a trusted channel. Pass `origin` as well when the peer is on
+   another machine and cannot dial the default loopback origin.
 2. On the other instance, call `interconnect_pair(code=...)`; it adds the first
    peer and returns a response code. Pass `origin` when the default loopback
    origin is not reachable from the peer.
